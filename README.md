@@ -186,13 +186,10 @@ Developers can use minip2p to build systems such as:
 
 ## Philosophy
 
-minip2p is built around the idea that **decentralized networking should be accessible everywhere—not just in the cloud**.
+minip2p is built around the idea that **decentralized networking should be accessible everywhere: not just in the cloud**.
 
 As compute increasingly moves to **the edge**, devices need lightweight ways to discover peers, exchange data, and coordinate tasks.
 
 By bringing the capabilities of libp2p to **embedded and resource-constrained environments**, minip2p enables a new generation of **self-organizing distributed systems** that run directly where data is generated.
 
-
-
-which would make the repo README much stronger.
 
