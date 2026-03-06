@@ -5,7 +5,7 @@ A minimal, educational libp2p implementation designed for:
 - **Learning**: Understanding how libp2p works under the hood
 - **FFI-Friendly**: Exposed to TypeScript/JavaScript via WebAssembly
 - **Sans-IO**: Pure state machines, host language handles all I/O
-- **Browser-First**: Primary target is browser environment with WebSocket transport
+- **QUIC-First**: Primary transport is QUIC (`/quic-v1`) before browser-specific transports
 
 ## Architecture Principles
 
@@ -28,8 +28,8 @@ pub fn poll(&mut self) -> Vec<Action> {
 // TypeScript: Executes the I/O
 for (const action of swarm.poll()) {
   if (action.type === "DIAL") {
-    const socket = new WebSocket(action.addr);
-    // ... handle connection
+    const conn = quicHost.dial(action.addr);
+    connections.set(action.conn_id, conn);
   } else if (action.type === "SEND") {
     connections.get(action.conn_id).send(action.data);
   }
@@ -98,13 +98,10 @@ minip2p/
 │   ├── mini_p2p.js               # JS glue code
 │   └── mini_p2p_bg.wasm          # WebAssembly binary
 └── examples/
-    └── browser/                  # Browser examples
-        ├── index.html            # Main demo page
-        ├── index.js              # TypeScript entry point
-        ├── swarm.js              # Swarm wrapper with callbacks
-        ├── ui.js                 # UI handling
-        ├── websocket.js          # WebSocket transport shim
-        └── styles.css            # Styling
+    └── quic/                     # QUIC host examples
+        ├── chat.rs               # Multi-peer chat demo
+        ├── ping.rs               # Ping/latency demo
+        └── host.rs               # QUIC host runtime glue
 ```
 
 ## Module Specifications
@@ -416,161 +413,107 @@ swarm.onEvent = (type, event) => {
 
 ## Transport Implementations
 
-### Browser WebSocket Transport
+### QUIC Transport (Primary)
 
-Primary transport for browser environment:
+Primary transport for the first implementation milestones is QUIC (`/quic-v1`).
 
-```typescript
-// Browser handles WebSocket I/O
-const ws = new WebSocket("wss://relay.example.com/p2p/QmPeerId");
-ws.binaryType = "arraybuffer";
+```rust
+use quinn::Endpoint;
 
-ws.onmessage = (event) => {
-  const data = new Uint8Array(event.data);
-  swarm.onDataReceived(connId, data);
-};
+// Host runtime performs I/O; core state machines stay sans-IO.
+let endpoint = Endpoint::client("[::]:0".parse()?)?;
+let conn = endpoint
+    .connect("127.0.0.1:9000".parse()?, "minip2p.local")?
+    .await?;
+
+let (mut send, mut recv) = conn.open_bi().await?;
+send.write_all(b"hello").await?;
 ```
 
-### WebRTC DataChannel (Future)
+### Browser Transport (Later)
 
-Direct browser-to-browser connections:
+Browser-targeted transports are implemented after QUIC is stable:
 
-- Uses public STUN/TURN servers for NAT traversal
-- Requires signaling server for initial handshake
-- Implemented after WebSocket transport is stable
+- WebTransport or WebRTC mapping for browser runtimes
+- Optional relay/circuit-relay support for restrictive NAT environments
+- Same swarm/protocol state machines reused across transports
 
-## Public Relay Strategy
+## Connectivity Strategy
 
-For browser-to-browser connectivity without dedicated infrastructure:
+Initial connectivity strategy for development and CI:
 
-**Primary Relay**: [libp2p-webrtc-star](https://github.com/libp2p/js-libp2p-webrtc-star) or similar
-
-- Public WebSocket relay servers
-- Circuit relay v2 protocol for NAT traversal
-- Free tier suitable for development/testing
-
-**Fallback**: WebRTC with public STUN
-
-- `stun.l.google.com:19302` (Google's public STUN)
-- `stun1.l.google.com:19302`
-- TURN server optional (for symmetric NAT)
+- Direct peer-to-peer QUIC over localhost/LAN
+- Static bootstrap peers over QUIC for small test networks
+- Later: auto-discovery and relay fallback where direct dialing fails
 
 ## Example Usage
 
-### Browser Chat Application
+### QUIC Chat Application
 
 ```typescript
 import init, { Swarm, PeerId, Callbacks } from "./pkg/mini_p2p.js";
+import { createQuicHost } from "./examples/quic/host.js";
 
-// Initialize WASM
 await init();
 
-// Create peer identity
+const host = createQuicHost();
+const connections = new Map();
 const myPeerId = PeerId.generate();
-console.log("My ID:", myPeerId.toString());
 
-// Setup callbacks for I/O operations
 const callbacks = new Callbacks(
-  // onDial: Create WebSocket connection
+  // onDial: open QUIC connection
   (addr, pendingId) => {
-    const ws = new WebSocket(addr);
-    ws.binaryType = "arraybuffer";
-
-    ws.onopen = () => {
-      connections.set(pendingId, ws);
-      swarm.onConnectionEstablished(pendingId, addr);
-    };
-
-    ws.onmessage = (event) => {
-      const data = new Uint8Array(event.data);
-      const events = swarm.onDataReceived(pendingId, data);
-      handleEvents(events);
-    };
-
-    ws.onclose = () => {
-      connections.delete(pendingId);
-      swarm.onConnectionClosed(pendingId, "WebSocket closed");
-    };
+    host.dial(addr, {
+      onOpen: (conn) => {
+        connections.set(pendingId, conn);
+        swarm.onConnectionEstablished(pendingId, addr);
+      },
+      onData: (data) => {
+        const events = swarm.onDataReceived(pendingId, data);
+        handleEvents(events);
+      },
+      onClose: (reason) => {
+        connections.delete(pendingId);
+        swarm.onConnectionClosed(pendingId, reason);
+      },
+    });
   },
 
-  // onSend: Send data via WebSocket
+  // onSend: write bytes to QUIC stream
   (connId, data) => {
-    const ws = connections.get(connId);
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(data);
-    }
+    const conn = connections.get(connId);
+    if (conn) conn.send(data);
   },
 
-  // onClose: Close WebSocket
+  // onClose: close QUIC connection
   (connId) => {
-    const ws = connections.get(connId);
-    if (ws) {
-      ws.close();
+    const conn = connections.get(connId);
+    if (conn) {
+      conn.close();
       connections.delete(connId);
     }
   },
 
-  // onEvent: Handle events from swarm
+  // onEvent
   (eventType, eventData) => {
     handleEvent(eventType, eventData);
   },
 
-  // onListen: Start listening (not used in browser relay mode)
+  // onListen: start QUIC listener
   (addr, listenerId) => {
-    console.log("Listen requested on", addr);
+    host.listen(addr, listenerId);
   },
 
-  // onTimer: Set timeout
+  // onTimer
   (timerId, durationMs) => {
-    setTimeout(() => {
-      swarm.onTimerExpired(timerId);
-    }, durationMs);
+    setTimeout(() => swarm.onTimerExpired(timerId), durationMs);
   },
 );
 
-// Create swarm
 const swarm = new Swarm(callbacks);
-
-// Subscribe to chat topic
-const actions = swarm.subscribe("chat-room");
-executeActions(actions);
-
-// Connect to relay
-const relayAddr = "wss://relay.libp2p.io/p2p/QmRelayPeerId";
-const dialActions = swarm.dial(relayAddr);
-executeActions(dialActions);
-
-// Send message
-document.getElementById("send").onclick = () => {
-  const message = document.getElementById("message").value;
-  const publishActions = swarm.publish("chat-room", message);
-  executeActions(publishActions);
-};
-
-// Handle events
-function handleEvent(type, data) {
-  switch (type) {
-    case "CONNECTION_ESTABLISHED":
-      console.log("Connected to", data.peer_id);
-      break;
-    case "GOSSIPSUB_MESSAGE":
-      displayMessage(data.source, data.data);
-      break;
-    case "PING_PONG":
-      console.log("Latency:", data.latency_ms, "ms");
-      break;
-  }
-}
-
-// Execute all pending actions
-function executeActions(actions) {
-  for (const action of actions) {
-    // Handled by callbacks above
-  }
-}
-
-// Main event loop (not needed with callback architecture)
-// All events come through onEvent callback
+const bootstrapAddr = "/ip4/127.0.0.1/udp/9000/quic-v1/p2p/12D3KooWBootstrap";
+executeActions(swarm.dial(bootstrapAddr));
+executeActions(swarm.subscribe("chat-room"));
 ```
 
 ## Dependencies
@@ -579,10 +522,10 @@ function executeActions(actions) {
 
 ```toml
 [dependencies]
-wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
-js-sys = "0.3"
-web-sys = "0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
+quinn = "0.11"
+rustls = "0.23"
+webpki-roots = "0.26"
 snow = "0.9"                    # Noise protocol
 ed25519-dalek = "2.0"           # Ed25519 signatures
 rand = "0.8"                    # Random number generation
@@ -591,13 +534,11 @@ bs58 = "0.5"                    # Base58 encoding
 thiserror = "1.0"               # Error handling
 log = "0.4"                     # Logging
 
-[dependencies.web-sys]
-version = "0.3"
-features = [
-    "console",
-    "Window",
-    "Document",
-]
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = "0.3"
 ```
 
 ### Build Configuration
@@ -645,15 +586,15 @@ mod tests {
 }
 ```
 
-### Browser Integration Tests
+### QUIC Integration Tests
 
-Manual testing via example pages:
+Manual/integration testing via local peers:
 
-1. Open two browser tabs
-2. Each generates unique PeerId
-3. Connect both to relay
+1. Start peer A listening on `/ip4/127.0.0.1/udp/9000/quic-v1`
+2. Start peer B with a unique PeerId
+3. Dial peer A over QUIC
 4. Exchange ping messages
-5. Subscribe to topic and exchange messages
+5. Subscribe to a topic and exchange pub/sub messages
 
 ### FFI Safety Tests
 
@@ -674,7 +615,7 @@ fn test_ffi_no_panic() {
 
 ### Milestone 1: Raw Connectivity
 
-- [ ] Two browser tabs connect via WebSocket relay
+- [ ] Two local peers connect via QUIC (`/quic-v1`)
 - [ ] Exchange raw bytes (echo test)
 - [ ] No crashes or memory leaks
 
@@ -728,7 +669,7 @@ By completing this implementation, you will understand:
 
 After core implementation is complete:
 
-- **QUIC Transport**: HTTP/3-based transport for better performance
+- **WebTransport/WebSocket Transport**: Browser-compatible transport adapters
 - **WebRTC**: Direct browser-to-browser connections
 - **Kademlia DHT**: Distributed hash table for peer discovery
 - **Bitswap**: Content-addressed data exchange
