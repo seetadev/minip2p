@@ -2,8 +2,16 @@
 
 extern crate alloc;
 
+#[cfg(feature = "ed25519")]
+mod ed25519;
 mod key;
 mod peer_id;
 
+#[cfg(all(feature = "ed25519", feature = "std"))]
+pub use ed25519::generate_ed25519;
+#[cfg(feature = "ed25519")]
+pub use ed25519::{
+    ED25519_PUBLIC_KEY_LENGTH, ED25519_SECRET_KEY_LENGTH, Ed25519Keypair, generate_ed25519_with_rng,
+};
 pub use key::{KeyType, PublicKey, PublicKeyError};
 pub use peer_id::{PEER_ID_MULTIHASH_SIZE, PeerId, PeerIdError, PeerMultihash, VarintError};

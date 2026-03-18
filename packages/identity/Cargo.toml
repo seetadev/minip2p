@@ -5,10 +5,13 @@ edition = "2024"
 readme = "README.md"
 
 [features]
-default = ["std"]
-std = ["thiserror/std", "multihash/std"]
+default = ["std", "ed25519"]
+std = ["thiserror/std", "multihash/std", "rand_core/std", "rand_core/getrandom"]
+ed25519 = ["dep:ed25519-dalek", "dep:rand_core", "ed25519-dalek/rand_core"]
 
 [dependencies]
 multihash = { version = "0.19", default-features = false, features = ["alloc"] }
 sha2 = { version = "0.10", default-features = false }
 thiserror = { version = "2", default-features = false }
+ed25519-dalek = { version = "2.2", default-features = false, optional = true }
+rand_core = { version = "0.6.4", default-features = false, optional = true }

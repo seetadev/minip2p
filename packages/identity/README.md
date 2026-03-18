@@ -1,6 +1,6 @@
 # minip2p-identity
 
-Small, `no_std`-friendly libp2p identity crate focused on public key protobuf encoding and peer ID derivation.
+Small, `no_std`-friendly libp2p identity crate focused on public key protobuf encoding, peer ID derivation, and feature-gated Ed25519 key generation.
 
 ## Features
 
@@ -13,27 +13,45 @@ Small, `no_std`-friendly libp2p identity crate focused on public key protobuf en
   - Legacy base58btc multihash form (`Qm...`, `12D3Koo...`).
   - CIDv1 with `libp2p-key` multicodec (`0x72`) in base32 multibase (`b...`).
 - Typed multihash API via `PeerMultihash` (`multihash::Multihash<64>`).
+- Ed25519 keypair generation (`ed25519` feature, enabled by default) with:
+  - `generate()` for `std` users.
+  - `generate_with_rng(...)` for `no_std` users.
 
 ## Usage
 
+Quick start (default features / `std`):
+
 ```rust
-use minip2p_identity::{KeyType, PeerId, PublicKey};
+use minip2p_identity::generate_ed25519;
 
-let public_key = PublicKey::new(KeyType::Ed25519, vec![0u8; 32]);
-let peer_id = PeerId::from_public_key(&public_key);
+let keypair = generate_ed25519();
+let peer_id = keypair.peer_id();
 
-let legacy = peer_id.to_base58();
-let cid = peer_id.to_cid_base32();
-let raw = peer_id.to_bytes();
+println!("peer id (base58): {}", peer_id.to_base58());
+println!("peer id (cidv1): {}", peer_id.to_cid_base32());
+```
 
-let reparsed = PeerId::from_bytes(&raw).unwrap();
-assert_eq!(reparsed, peer_id);
+Recover from secret key bytes:
 
-let parsed_legacy: PeerId = legacy.parse().unwrap();
-let parsed_cid: PeerId = cid.parse().unwrap();
+```rust
+use minip2p_identity::{generate_ed25519, Ed25519Keypair};
 
-assert_eq!(parsed_legacy, peer_id);
-assert_eq!(parsed_cid, peer_id);
+let generated = generate_ed25519();
+let restored = Ed25519Keypair::from_secret_key_bytes(generated.secret_key_bytes());
+
+assert_eq!(restored.public_key_bytes(), generated.public_key_bytes());
+assert_eq!(restored.peer_id(), generated.peer_id());
+```
+
+Generate in `no_std` by supplying your own CSPRNG (`ed25519` feature):
+
+```rust
+use minip2p_identity::Ed25519Keypair;
+use rand_core::CryptoRngCore;
+
+fn generate_with_rng<R: CryptoRngCore + ?Sized>(rng: &mut R) -> Ed25519Keypair {
+    Ed25519Keypair::generate_with_rng(rng)
+}
 ```
 
 ## Error semantics
@@ -129,6 +147,16 @@ Disable default features:
 minip2p-identity = { path = "packages/identity", default-features = false }
 ```
 
+Enable Ed25519 key generation in `no_std`:
+
+```toml
+[dependencies]
+minip2p-identity = { path = "packages/identity", default-features = false, features = ["ed25519"] }
+rand_core = { version = "0.6.4", default-features = false }
+```
+
 ## Scope
 
-This crate currently covers key container encoding and peer ID computation/parsing. It does not yet include key generation or signature primitives.
+This crate covers key container encoding and peer ID computation/parsing.
+It includes feature-gated Ed25519 key generation (`ed25519`, enabled by default),
+but does not include signature primitives.
