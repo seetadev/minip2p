@@ -26,9 +26,9 @@ Small, `no_std`-friendly libp2p identity crate focused on public key protobuf en
 Quick start (default features / `std`):
 
 ```rust
-use minip2p_identity::generate_ed25519;
+use minip2p_identity::Ed25519Keypair;
 
-let keypair = generate_ed25519();
+let keypair = Ed25519Keypair::generate();
 let peer_id = keypair.peer_id();
 
 println!("peer id (base58): {}", peer_id.to_base58());
@@ -38,9 +38,9 @@ println!("peer id (cidv1): {}", peer_id.to_cid_base32());
 Recover from secret key bytes:
 
 ```rust
-use minip2p_identity::{generate_ed25519, Ed25519Keypair};
+use minip2p_identity::Ed25519Keypair;
 
-let generated = generate_ed25519();
+let generated = Ed25519Keypair::generate();
 let restored = Ed25519Keypair::from_secret_key_bytes(generated.secret_key_bytes());
 
 assert_eq!(restored.public_key_bytes(), generated.public_key_bytes());
@@ -80,7 +80,7 @@ Sign and verify a bundled payload:
 use minip2p_identity::{Ed25519Keypair, SignedBytes};
 
 let keypair = Ed25519Keypair::from_secret_key_bytes([7u8; 32]);
-let signed = SignedBytes::sign_ed25519(&keypair, b"payload".to_vec());
+let signed = SignedBytes::sign_ed25519(&keypair, b"payload");
 
 signed.verify()?;
 # Ok::<(), minip2p_identity::VerifyError>(())

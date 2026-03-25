@@ -78,6 +78,13 @@ impl PeerId {
         self.multihash.to_bytes()
     }
 
+    /// Returns the raw digest bytes without allocation.
+    ///
+    /// For the full encoded multihash (code + size + digest), use `to_bytes()`.
+    pub fn digest_bytes(&self) -> &[u8] {
+        self.multihash.digest()
+    }
+
     /// Encodes this peer id as legacy base58btc multihash text.
     pub fn to_base58(&self) -> String {
         let multihash = self.to_bytes();

@@ -86,15 +86,16 @@ impl Ed25519Keypair {
     }
 }
 
-/// Generates a new Ed25519 keypair using the provided CSPRNG.
-pub fn generate_ed25519_with_rng<R: CryptoRngCore + ?Sized>(rng: &mut R) -> Ed25519Keypair {
-    Ed25519Keypair::generate_with_rng(rng)
+impl From<&Ed25519Keypair> for PublicKey {
+    fn from(keypair: &Ed25519Keypair) -> Self {
+        keypair.public_key()
+    }
 }
 
-/// Generates a new Ed25519 keypair using OS randomness.
-#[cfg(feature = "std")]
-pub fn generate_ed25519() -> Ed25519Keypair {
-    Ed25519Keypair::generate()
+impl From<&Ed25519Keypair> for PeerId {
+    fn from(keypair: &Ed25519Keypair) -> Self {
+        keypair.peer_id()
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 use alloc::vec::Vec;
+use core::fmt;
 use thiserror::Error;
 
 use crate::peer_id::{read_uvarint, uvarint_len, write_uvarint};
@@ -121,11 +122,11 @@ impl PublicKey {
         })
     }
 
-    /// Verifies a signature against this public key.
+    /// Verifies an Ed25519 signature against this public key.
     ///
     /// Currently only Ed25519 verification is supported.
     #[cfg(feature = "ed25519")]
-    pub fn verify(&self, message: &[u8], signature: &[u8]) -> Result<(), VerifyError> {
+    pub fn verify(&self, message: &[u8], signature: &[u8; 64]) -> Result<(), VerifyError> {
         match self.key_type {
             KeyType::Ed25519 => {
                 let public_key_bytes: [u8; 32] = self.data.as_slice().try_into().map_err(|_| {
@@ -136,14 +137,7 @@ impl PublicKey {
                 let verifying_key = VerifyingKey::from_bytes(&public_key_bytes)
                     .map_err(|_| VerifyError::InvalidEd25519PublicKey)?;
 
-                let signature_bytes: [u8; 64] =
-                    signature
-                        .try_into()
-                        .map_err(|_| VerifyError::InvalidSignatureLength {
-                            expected: 64,
-                            actual: signature.len(),
-                        })?;
-                let signature = Signature::from_bytes(&signature_bytes);
+                let signature = Signature::from_bytes(signature);
 
                 verifying_key
                     .verify_strict(message, &signature)
@@ -151,6 +145,25 @@ impl PublicKey {
             }
             other => Err(VerifyError::UnsupportedKeyType(other)),
         }
+    }
+}
+
+impl fmt::Display for PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}:", self.key_type)?;
+        for byte in &self.data {
+            write!(f, "{:02x}", byte)?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::LowerHex for PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in &self.data {
+            write!(f, "{:02x}", byte)?;
+        }
+        Ok(())
     }
 }
 
@@ -182,8 +195,6 @@ pub enum VerifyError {
     InvalidEd25519PublicKeyLength { actual: usize },
     #[error("invalid ed25519 public key bytes")]
     InvalidEd25519PublicKey,
-    #[error("invalid signature length: expected {expected}, got {actual}")]
-    InvalidSignatureLength { expected: usize, actual: usize },
     #[error("signature verification failed")]
     InvalidSignature,
 }
@@ -257,26 +268,6 @@ mod tests {
             .verify(message, &signature)
             .expect_err("tampered signature must fail");
         assert_eq!(err, VerifyError::InvalidSignature);
-    }
-
-    #[cfg(feature = "ed25519")]
-    #[test]
-    fn rejects_wrong_signature_length() {
-        let keypair = Ed25519Keypair::from_secret_key_bytes([13u8; 32]);
-        let message = b"minip2p-signature";
-        let short_sig = vec![0u8; 63];
-
-        let err = keypair
-            .public_key()
-            .verify(message, &short_sig)
-            .expect_err("short signature must fail");
-        assert_eq!(
-            err,
-            VerifyError::InvalidSignatureLength {
-                expected: 64,
-                actual: 63,
-            }
-        );
     }
 
     #[cfg(feature = "ed25519")]

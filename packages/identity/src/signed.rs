@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use crate::{ED25519_SIGNATURE_LENGTH, Ed25519Keypair, PublicKey, VerifyError};
+use crate::{Ed25519Keypair, PublicKey, VerifyError, ED25519_SIGNATURE_LENGTH};
 
 /// Signed byte payload using an embedded public key and Ed25519 signature.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -12,7 +12,8 @@ pub struct SignedBytes {
 
 impl SignedBytes {
     /// Signs payload bytes with an Ed25519 keypair.
-    pub fn sign_ed25519(keypair: &Ed25519Keypair, payload: Vec<u8>) -> Self {
+    pub fn sign_ed25519(keypair: &Ed25519Keypair, payload: impl Into<Vec<u8>>) -> Self {
+        let payload = payload.into();
         let signature = keypair.sign(&payload);
         Self {
             public_key: keypair.public_key(),
@@ -70,16 +71,16 @@ mod tests {
     #[test]
     fn signs_and_verifies_payload() {
         let keypair = Ed25519Keypair::from_secret_key_bytes([21u8; 32]);
-        let payload = b"hello-minip2p".to_vec();
+        let payload = b"hello-minip2p";
 
-        let signed = SignedBytes::sign_ed25519(&keypair, payload);
+        let signed = SignedBytes::sign_ed25519(&keypair, payload.as_slice());
         signed.verify().expect("signature must verify");
     }
 
     #[test]
     fn rejects_tampered_payload() {
         let keypair = Ed25519Keypair::from_secret_key_bytes([23u8; 32]);
-        let signed = SignedBytes::sign_ed25519(&keypair, b"payload".to_vec());
+        let signed = SignedBytes::sign_ed25519(&keypair, b"payload");
 
         let mut tampered_payload = signed.payload().to_vec();
         tampered_payload[0] ^= 0x01;
