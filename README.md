@@ -1,66 +1,61 @@
 # minip2p
 
-A minimal, educational [libp2p](https://libp2p.io/) implementation in Rust, designed around explicit state machines and a future WebAssembly/TypeScript host API.
+A minimal, educational [libp2p](https://libp2p.io/) implementation in Rust.
 
-## Why this project exists
+The project is built around four non-negotiables:
 
-- **Sans-IO architecture**: protocol logic produces I/O intents; host runtimes execute network/timer I/O.
-- **FFI-friendly APIs**: crate boundaries and data types are chosen to support future WASM interop.
+- **Sans-I/O architecture** for protocol and transport state machines.
+- **`no_std`-friendly core crates** (`alloc`-based where needed).
+- **Top-notch DX** with clear defaults, actionable errors, and easy local bring-up.
+- **FFI-friendly APIs** so Rust boundaries can later map cleanly to WASM/TypeScript hosts.
 
-## Current status
+## Workspace status
 
-This repository is an early-stage workspace with two crates:
+Current crates:
 
-- `packages/identity` (`minip2p-identity`): implemented and tested.
-- `packages/core` (`minip2p-core`): scaffold crate for shared types/logic.
+- `packages/identity` (`minip2p-identity`): peer identity primitives and validation.
+- `packages/core` (`minip2p-core`): transport-agnostic address/types (`Multiaddr`, `PeerAddr`, `PeerId` re-export).
+- `packages/transport` (`minip2p-transport`): transport contract types, connection lifecycle, events, and errors.
+- `transports/quic` (`minip2p-quic`): `std` QUIC transport adapter built on `quiche`.
 
-At the moment, the identity crate is the main functional piece; swarm/transport/protocol crates are not yet in this workspace.
+Current validated behavior:
+
+- Two local peers connect over QUIC in integration tests.
+- Peers exchange bytes bidirectionally.
+- Multiple simultaneous connections per peer are supported.
+- Identity upgrade events are emitted and peer indexing updates correctly.
+
+## Architecture boundaries
+
+- `packages/identity`, `packages/core`, and `packages/transport` are designed to remain `no_std + alloc` friendly.
+- Runtime networking concerns (sockets, DNS, timers) belong in transport adapter crates.
+- Transport-specific address validation belongs in transport adapters, not `packages/core`.
 
 ## Quick start
 
-### Prerequisites
+Prerequisites:
 
 - Rust stable toolchain
 - Cargo
 
-### Build and test
+Build and run tests:
 
 ```bash
 cargo test
 ```
 
-## Planned architecture
+Run QUIC integration tests only:
 
-The roadmap targets a modular libp2p stack with explicit state machines and WASM-facing APIs:
+```bash
+cargo test -p minip2p-quic
+```
 
-- **Core**: `PeerId`, `Multiaddr`, shared primitives.
-- **Crypto**: Noise XX handshake state machine.
-- **Transport**: connection abstraction and host-driven network I/O.
-- **Protocols**: multistream-select, ping, identify, gossipsub.
-- **Swarm**: central coordinator emitting `Action` intents and `SwarmEvent`s.
-- **FFI**: callback-based bridge for JavaScript/TypeScript.
+## Roadmap focus
 
-## Milestone roadmap
+- [x] Local QUIC connectivity and integration coverage.
+- [ ] Harden transport contract guarantees for long-term multi-transport support.
+- [ ] Improve QUIC ergonomics and operational diagnostics.
+- [ ] Add core protocols (Noise XX, ping, identify, gossipsub).
+- [ ] Introduce additional transport adapters (TCP, WebSocket, WebRTC).
 
-- [ ] Raw connectivity over QUIC (`/quic-v1`).
-- [ ] Encrypted connections using Noise XX.
-- [ ] Ping protocol with latency + timeout handling.
-- [ ] Identify protocol for peer metadata exchange.
-- [ ] GossipSub pub/sub mesh behavior.
-- [ ] Documentation polish, examples, and benchmarks.
-
-## Design principles
-
-- **Pure state machines**: no hidden async runtime in protocol logic.
-- **Clear action/event boundaries**: host executes I/O; library describes intent.
-- **FFI-safe surface area**: explicit conversions and error handling.
-- **Educational clarity**: predictable behavior and testable components.
-
-## Next focus areas
-
-Short-term, this repository is expected to expand from identity primitives into:
-
-1. Shared core types (`Multiaddr`, common errors/types).
-2. Transport + connection lifecycle state management.
-3. Initial swarm orchestration and action/event plumbing.
-4. Protocol negotiation and baseline ping/identify flows.
+See `plan.md` for the detailed execution plan and milestones.

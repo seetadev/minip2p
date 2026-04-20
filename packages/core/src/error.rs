@@ -42,8 +42,6 @@ pub enum PeerAddrError {
     NonTerminalPeerId { segment: usize },
     #[error("transport address must not already contain /p2p")]
     TransportContainsPeerId,
-    #[error(
-        "transport must be one host protocol + /udp/<port>/quic-v1 (host is ip4/ip6/dns/dns4/dns6)"
-    )]
-    InvalidTransportShape,
+    #[error("transport address must contain at least one protocol before /p2p/<peer-id>")]
+    EmptyTransport,
 }
