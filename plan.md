@@ -1,196 +1,132 @@
-## MiniP2P Plan (Better DX + Opinionated)
+## MiniP2P Plan (DX + Sans-I/O + no_std)
 
-This plan keeps the same core technical direction and improves developer experience:
+This plan reflects the current repository state and the next execution steps.
 
-- **Sans-IO stays**: protocol logic remains pure state machines.
-- **QUIC-first stays**: primary early transport remains QUIC (`/quic-v1`).
-- **`no_std` support**: core crates are designed to work with `no_std` + `alloc`.
-- **Lightweight by design**: keep memory, CPU, and dependency footprint small.
-- **Better DX**: easier onboarding, clearer errors, stronger defaults.
-- **Opinionated defaults**: good behavior out of the box, with optional overrides.
+## Non-Negotiables
 
-The architecture remains educational and explicit, while setup and operations become simpler.
+- **Sans-I/O first**: protocol and transport logic are state machines, not runtime-bound loops.
+- **`no_std + alloc` core**: core packages remain portable across embedded and constrained targets.
+- **DX-first API design**: local setup should be easy, defaults should be practical, and errors should be actionable.
+- **Transport extensibility**: architecture must support QUIC now, then TCP/WS/WebRTC without core rewrites.
+- **FFI-friendly boundaries**: public APIs should be designed so future WASM/TypeScript integration is straightforward.
 
-## What Success Looks Like
+## Current Baseline
 
-By default, a new user should be able to:
+Implemented crates:
 
-1. Install and run a local two-peer demo in under 5 minutes.
-2. Start with safe defaults and no mandatory advanced settings.
-3. Change behavior via config file, env vars, or runtime overrides.
-4. Understand failures from actionable error messages.
+- `packages/identity` (`minip2p-identity`)
+- `packages/core` (`minip2p-core`)
+- `packages/transport` (`minip2p-transport`)
+- `transports/quic` (`minip2p-quic`)
 
-## Target Users
+Current validated capabilities:
 
-- **Learner**: wants to understand libp2p internals without too much boilerplate.
-- **App developer**: wants a stable API and good defaults for local networking.
-- **Integrator**: needs predictable configuration for CI, staging, and production.
+- Local two-peer QUIC connectivity in integration tests.
+- Bidirectional byte exchange.
+- Multiple connections per peer with policy-based selection.
+- Identity upgrade event flow and peer index updates.
 
-## Product Principles
+## Architecture Boundaries
 
-### 1) Beginner-First Defaults
+### Core (`no_std + alloc`)
 
-- Provide default transport/protocol settings that work for localhost immediately.
-- Make advanced knobs optional.
-- Keep first examples copy/paste friendly.
+- `packages/identity`: peer identity primitives.
+- `packages/core`: transport-agnostic address and shared types.
+- `packages/transport`: transport contract, shared connection/event/error types.
 
-### 2) Progressive Complexity
+### Runtime adapters (`std`)
 
-- Quick start path for basic use.
-- Advanced sections for protocol tuning and transport details.
-- Public API should expose power without requiring it.
+- `transports/quic`: QUIC implementation and DX-oriented runtime integration.
+- Future `transports/tcp`, `transports/ws`, `transports/webrtc` follow the same separation.
 
-### 3) Opinionated Defaults
+### Ownership rules
 
-- Choose practical defaults for local-first usage.
-- Reduce setup choices for first-time users.
-- Allow overrides without requiring them for normal use.
+- Runtime concerns (UDP/TCP sockets, DNS resolution, timers) belong in adapter crates.
+- Transport-specific address validation belongs in adapters, not in `packages/core`.
+- Shared crates define generic contracts and common semantics only.
 
-### 4) `no_std` + Lightweight First
+## DX Principles
 
-- Keep protocol/state-machine crates `no_std` compatible (using `alloc` where needed).
-- Separate runtime adapters (`std`/network/FFI) from core protocol logic.
-- Prefer small, focused dependencies and avoid unnecessary abstraction overhead.
+- **Fast first success**: new users should get two peers connected in under 5 minutes.
+- **Progressive complexity**: simple default path first, advanced tuning second.
+- **Consistent semantics**: same event and error shape across transport adapters.
+- **Actionable failures**: errors should include context and suggested next fix.
+- **Docs as product**: quickstart and troubleshooting are part of the API quality bar.
 
-### 5) Configuration Consistency
+## Transport Extensibility Policy
 
-- One config schema shared by Rust and JS/WASM entry points.
-- Same key names across all surfaces.
-- Explicit precedence and validation rules.
+- `PeerAddr` remains transport-agnostic and only guarantees terminal `/p2p/<peer-id>` semantics.
+- Each transport crate validates its own accepted address shapes.
+- Transport crates may expose ergonomic helper APIs while conforming to shared transport contracts.
 
-### 6) Clear Operational Feedback
+## Roadmap (Outcome-Driven)
 
-- Structured logs and consistent event names.
-- Error messages include cause + suggested fix when possible.
-- Diagnostic mode for handshake and protocol negotiation traces.
+### Milestone 0: Docs and boundary alignment
 
-## Proposed User Experience
-
-### Quick Start Path
-
-- `cargo test` validates local build health.
-- `examples/` include a basic connect + ping + pub/sub walkthrough.
-- "Getting started" docs focus on outcomes, not internals.
-
-### Optional Future CLI (Nice-to-have)
-
-- `minip2p init` creates starter config.
-- `minip2p run --config minip2p.toml` starts a node.
-- `minip2p inspect` prints effective merged config.
-
-## Configuration Strategy
-
-### Config Sources and Precedence
-
-From lowest to highest priority:
-
-1. Built-in defaults
-2. Config file (`minip2p.toml`)
-3. Environment variables (`MINIP2P_*`)
-4. Runtime overrides (API/CLI flags)
-
-### Validation Rules
-
-- Validate all user-provided values at startup.
-- Fail fast on invalid types or out-of-range values.
-- Include exact config path in errors (for example, `protocols.ping.interval_ms`).
-
-## Roadmap (User-Outcome Driven)
-
-### Milestone 0: Foundation Cleanup
-
-- Align docs with current workspace reality (`packages/identity`, `packages/core`).
-- Add a simple "state of the project" section in README.
-- Define stable config schema draft.
-- Define and document `no_std` boundaries for each planned crate.
+- Keep root docs aligned with actual workspace crates and capabilities.
+- Document no_std boundaries and adapter responsibilities.
+- Clarify transport-agnostic vs transport-specific validation responsibilities.
 
 **Exit criteria**
-- New contributors can run tests and understand project status in under 10 minutes.
+- New contributors can run tests and explain crate boundaries in under 10 minutes.
 
-### Milestone 1: Config Core + Defaults
+### Milestone 1: Transport contract hardening
 
-- Implement typed config structs with defaults.
-- Add file/env/runtime merge logic.
-- Add config validation and human-readable errors.
-- Keep config/core types usable from `no_std` contexts where practical.
-
-**Exit criteria**
-- A node can start from defaults only.
-- A user can override at least 5 key settings via env vars.
-
-### Milestone 2: Local Connectivity (QUIC)
-
-- Bring up two local peers over QUIC with default config.
-- Add clear connection lifecycle events.
-- Document first working local network flow.
+- Refine transport guarantees (message semantics, event ordering, close behavior).
+- Ensure shared error taxonomy is adapter-agnostic and actionable.
+- Add conformance tests for transport contract behavior.
 
 **Exit criteria**
-- Two peers connect and exchange bytes reliably in local integration tests.
+- Shared transport behavior is explicit and test-backed.
 
-### Milestone 3: Core Protocols (Ping + Identify)
+### Milestone 2: QUIC DX polish
 
-- Enable ping and identify by default.
-- Add protocol-specific config knobs.
-- Improve event payloads for host apps.
-
-**Exit criteria**
-- Ping latency and timeout events are visible and deterministic.
-- Identify data is available to host runtime.
-
-### Milestone 4: GossipSub (Configurable)
-
-- Implement subscribe/publish baseline.
-- Expose mesh and heartbeat tuning via config.
-- Add anti-duplication behavior and tests.
+- Improve QUIC docs and ergonomics for local development.
+- Tighten diagnostics around dial/listen/send/close failures.
+- Keep integration tests stable and deterministic.
 
 **Exit criteria**
-- Multi-peer local topic propagation works with configurable mesh parameters.
+- New users can run QUIC examples/tests with minimal setup and clear feedback.
 
-### Milestone 5: DX and Operational Polish
+### Milestone 3: Additional transport adapters
 
-- Add guided examples and troubleshooting docs.
-- Provide structured logging and debug mode.
-- Improve error catalog and common remediation hints.
+- Add `transports/tcp` and `transports/ws` prototypes aligned to shared contract.
+- Validate adapter parity for key lifecycle and send/receive behaviors.
+- Plan WebRTC adapter shape and required browser/runtime bridges.
 
 **Exit criteria**
-- At least one end-to-end example runs from docs with no hidden steps.
+- At least one non-QUIC transport reaches local two-peer connectivity parity.
 
-## Proposed Workspace Evolution
+### Milestone 4: Core protocols
 
-Current crates:
+- Add Noise XX handshake state machine.
+- Add ping and identify protocols with deterministic events.
+- Start gossipsub baseline after ping/identify stabilization.
 
-- `packages/identity` (implemented)
-- `packages/core` (scaffold)
+**Exit criteria**
+- Ping and identify are visible through stable host-facing events.
 
-Planned additions:
+### Milestone 5: Swarm, FFI, and operational polish
 
-- `packages/config` for typed settings, merge, and validation.
-- `packages/transport` for connection state and transport abstractions.
-- `packages/protocols` for multistream/ping/identify/gossipsub.
-- `packages/swarm` for orchestration and action/event boundaries.
-- `packages/ffi` for WASM-safe interfaces.
+- Introduce swarm orchestration and clearer action/event plumbing.
+- Design FFI-safe boundaries for JS/WASM embedding.
+- Expand troubleshooting docs and runnable examples.
 
-## Documentation Plan
-
-- `README.md`: quick start + current status + minimal architecture map.
-- `docs/config.md`: full config reference with defaults and examples.
-- `docs/troubleshooting.md`: common errors and fixes.
-- `examples/`: numbered examples from easiest to advanced.
+**Exit criteria**
+- One end-to-end example runs from docs without hidden steps.
 
 ## Quality Gates
 
-- Unit tests for config parsing/merge/validation.
-- Integration tests for two-peer local connectivity.
-- Snapshot tests for key event and error payloads.
-- CI check that docs examples remain runnable.
-- CI checks for `no_std` builds on core crates.
-- Track size and dependency budgets to preserve lightweight defaults.
+- Unit tests for core parsing/types and error behavior.
+- Integration tests for two-peer connectivity per transport.
+- `cargo check --no-default-features` for `packages/identity`, `packages/core`, and `packages/transport`.
+- Stable, documented error messages for common misconfiguration paths.
+- Dependency and footprint discipline for core crates.
 
-## Decision Log (Initial)
+## Decision Log
 
-- Keep **sans-IO** as non-negotiable architecture.
-- Keep **QUIC-first** for early milestones.
-- Require **`no_std` support** for core state-machine crates.
-- Keep the stack **lightweight** in code size and dependencies.
-- Improve **DX** through clearer workflows, docs, and errors.
-- Be **opinionated by default**, configurable when needed.
+- Keep **Sans-I/O** as architecture baseline.
+- Keep **`no_std + alloc`** support for shared/core crates.
+- Keep **QUIC-first** while designing for **multi-transport** expansion.
+- Keep `transports/quic` as a **single crate** with internal layering for logic and runtime ergonomics.
+- Optimize for **DX** without compromising explicit architecture boundaries.

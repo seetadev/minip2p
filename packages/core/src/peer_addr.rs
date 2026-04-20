@@ -2,7 +2,7 @@ use core::{fmt, str::FromStr};
 
 use minip2p_identity::PeerId;
 
-use crate::{multiaddr::is_quic_transport_slice, Multiaddr, PeerAddrError, Protocol};
+use crate::{Multiaddr, PeerAddrError, Protocol};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct PeerAddr {
@@ -20,8 +20,8 @@ impl PeerAddr {
             return Err(PeerAddrError::TransportContainsPeerId);
         }
 
-        if !transport.is_quic_transport() {
-            return Err(PeerAddrError::InvalidTransportShape);
+        if transport.is_empty() {
+            return Err(PeerAddrError::EmptyTransport);
         }
 
         Ok(Self { transport, peer_id })
@@ -53,8 +53,8 @@ impl PeerAddr {
         };
 
         let transport_slice = &protocols[..last];
-        if !is_quic_transport_slice(transport_slice) {
-            return Err(PeerAddrError::InvalidTransportShape);
+        if transport_slice.is_empty() {
+            return Err(PeerAddrError::EmptyTransport);
         }
 
         let transport = Multiaddr::from_protocols(transport_slice.to_vec());
@@ -144,10 +144,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_transport_shape() {
+    fn allows_transport_without_quic_marker() {
         let transport = Multiaddr::from_str("/ip4/127.0.0.1/udp/4001").expect("must parse");
         let peer_id = PeerId::from_str(PEER_ID).expect("peer id must parse");
-        let err = PeerAddr::new(transport, peer_id).expect_err("must fail");
-        assert!(matches!(err, PeerAddrError::InvalidTransportShape));
+        let peer_addr = PeerAddr::new(transport, peer_id).expect("must build");
+
+        assert_eq!(
+            peer_addr.to_string(),
+            format!("/ip4/127.0.0.1/udp/4001/p2p/{PEER_ID}")
+        );
     }
 }

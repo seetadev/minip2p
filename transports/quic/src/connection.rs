@@ -1,3 +1,4 @@
+use std::collections::{HashMap, VecDeque};
 use std::net::{SocketAddr, UdpSocket};
 
 use minip2p_core::PeerId;
@@ -6,6 +7,8 @@ use minip2p_transport::{
 };
 
 const SEND_BUF_SIZE: usize = 1350;
+const FRAME_LEN_BYTES: usize = 4;
+const MAX_FRAME_SIZE: usize = 1024 * 1024;
 
 pub struct QuicConnection {
     id: ConnectionId,
@@ -13,6 +16,8 @@ pub struct QuicConnection {
     peer_addr: SocketAddr,
     endpoint: ConnectionEndpoint,
     state: ConnectionState,
+    pending_stream_frames: VecDeque<(Vec<u8>, usize)>,
+    stream_recv_buffers: HashMap<u64, Vec<u8>>,
 }
 
 impl QuicConnection {
@@ -28,6 +33,8 @@ impl QuicConnection {
             peer_addr,
             endpoint,
             state: ConnectionState::Connecting,
+            pending_stream_frames: VecDeque::new(),
+            stream_recv_buffers: HashMap::new(),
         }
     }
 
@@ -79,6 +86,7 @@ impl QuicConnection {
 
         if self.state == ConnectionState::Connecting && self.conn.is_established() {
             self.state = ConnectionState::Connected;
+            self.drain_send_queue()?;
             self.flush(socket)?;
 
             events.push(TransportEvent::Connected {
@@ -86,6 +94,7 @@ impl QuicConnection {
                 endpoint: self.endpoint.clone(),
             });
         } else {
+            self.drain_send_queue()?;
             self.flush(socket)?;
         }
 
@@ -93,14 +102,27 @@ impl QuicConnection {
     }
 
     pub fn send_data(&mut self, data: &[u8], socket: &UdpSocket) -> Result<(), TransportError> {
-        let stream_id = if self.conn.is_server() { 1 } else { 0 };
-
-        self.conn
-            .stream_send(stream_id, data, false)
-            .map_err(|e| TransportError::SendFailed {
+        if data.len() > MAX_FRAME_SIZE {
+            return Err(TransportError::SendFailed {
                 id: self.id,
-                reason: format!("stream_send error: {e}"),
-            })?;
+                reason: format!(
+                    "message size {} exceeds max frame size {MAX_FRAME_SIZE}",
+                    data.len()
+                ),
+            });
+        }
+
+        let frame_len = u32::try_from(data.len()).map_err(|_| TransportError::SendFailed {
+            id: self.id,
+            reason: format!("message size {} exceeds u32 framing limit", data.len()),
+        })?;
+
+        let mut frame = Vec::with_capacity(FRAME_LEN_BYTES + data.len());
+        frame.extend_from_slice(&frame_len.to_be_bytes());
+        frame.extend_from_slice(data);
+
+        self.pending_stream_frames.push_back((frame, 0));
+        self.drain_send_queue()?;
 
         self.flush(socket)?;
         Ok(())
@@ -115,6 +137,7 @@ impl QuicConnection {
             })?;
 
         self.state = ConnectionState::Closing;
+        self.drain_send_queue()?;
         self.flush(socket)?;
         Ok(())
     }
@@ -131,15 +154,26 @@ impl QuicConnection {
         let mut buf = [0u8; 65535];
 
         for stream_id in self.conn.readable() {
-            while let Ok((read, fin)) = self.conn.stream_recv(stream_id, &mut buf) {
-                if read > 0 {
-                    events.push(TransportEvent::Received {
-                        id: self.id,
-                        data: buf[..read].to_vec(),
-                    });
-                }
-                if fin {
-                    break;
+            loop {
+                match self.conn.stream_recv(stream_id, &mut buf) {
+                    Ok((read, fin)) => {
+                        if read > 0 {
+                            self.process_stream_chunk(stream_id, &buf[..read], events, socket)?;
+                        }
+
+                        if fin {
+                            self.stream_recv_buffers.remove(&stream_id);
+                            break;
+                        }
+                    }
+                    Err(quiche::Error::Done) => break,
+                    Err(e) => {
+                        events.push(TransportEvent::Error {
+                            id: self.id,
+                            message: format!("stream_recv error on {stream_id}: {e}"),
+                        });
+                        break;
+                    }
                 }
             }
         }
@@ -169,6 +203,90 @@ impl QuicConnection {
                 }
             })?;
         }
+        Ok(())
+    }
+
+    fn drain_send_queue(&mut self) -> Result<(), TransportError> {
+        let stream_id = if self.conn.is_server() { 1 } else { 0 };
+
+        while let Some((frame, mut sent)) = self.pending_stream_frames.pop_front() {
+            while sent < frame.len() {
+                match self.conn.stream_send(stream_id, &frame[sent..], false) {
+                    Ok(written) => {
+                        if written == 0 {
+                            self.pending_stream_frames.push_front((frame, sent));
+                            return Ok(());
+                        }
+                        sent += written;
+                    }
+                    Err(quiche::Error::Done) => {
+                        self.pending_stream_frames.push_front((frame, sent));
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        return Err(TransportError::SendFailed {
+                            id: self.id,
+                            reason: format!("stream_send error: {e}"),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn process_stream_chunk(
+        &mut self,
+        stream_id: u64,
+        chunk: &[u8],
+        events: &mut Vec<TransportEvent>,
+        socket: &UdpSocket,
+    ) -> Result<(), TransportError> {
+        let mut close_due_to_frame_size = false;
+
+        {
+            let buffer = self.stream_recv_buffers.entry(stream_id).or_default();
+            buffer.extend_from_slice(chunk);
+
+            loop {
+                if buffer.len() < FRAME_LEN_BYTES {
+                    break;
+                }
+
+                let frame_len =
+                    u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+
+                if frame_len > MAX_FRAME_SIZE {
+                    events.push(TransportEvent::Error {
+                        id: self.id,
+                        message: format!(
+                            "received frame of {frame_len} bytes exceeding max {MAX_FRAME_SIZE}"
+                        ),
+                    });
+
+                    buffer.clear();
+                    close_due_to_frame_size = true;
+                    break;
+                }
+
+                let total_len = FRAME_LEN_BYTES + frame_len;
+                if buffer.len() < total_len {
+                    break;
+                }
+
+                events.push(TransportEvent::Received {
+                    id: self.id,
+                    data: buffer[FRAME_LEN_BYTES..total_len].to_vec(),
+                });
+                buffer.drain(..total_len);
+            }
+        }
+
+        if close_due_to_frame_size {
+            self.close(socket)?;
+        }
+
         Ok(())
     }
 

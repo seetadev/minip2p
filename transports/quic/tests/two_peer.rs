@@ -70,6 +70,38 @@ fn setup_pair() -> (QuicTransport, QuicTransport, PeerAddr, TempDir) {
     (server, client, peer_addr, cert_dir)
 }
 
+fn drive_pair_once(
+    server: &mut QuicTransport,
+    client: &mut QuicTransport,
+) -> (Vec<TransportEvent>, Vec<TransportEvent>) {
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let server_events = server.poll().expect("server poll");
+    let client_events = client.poll().expect("client poll");
+    (server_events, client_events)
+}
+
+fn wait_for_client_connection(
+    server: &mut QuicTransport,
+    client: &mut QuicTransport,
+    expected: ConnectionId,
+    peer_addr: &PeerAddr,
+    max_iters: usize,
+) -> bool {
+    for _ in 0..max_iters {
+        let (_, client_events) = drive_pair_once(server, client);
+        for event in client_events {
+            if let TransportEvent::Connected { id, endpoint } = event {
+                if id == expected {
+                    assert_eq!(endpoint.peer_id(), Some(peer_addr.peer_id()));
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
 #[test]
 fn two_peers_connect_and_exchange_data() {
     let (mut server, mut client, peer_addr, _cert_dir) = setup_pair();
@@ -377,4 +409,150 @@ fn identity_upgrade_emits_verified_event_and_updates_peer_index() {
 
     let indexed = server.connection_ids_for_peer(&verified_peer_id);
     assert_eq!(indexed, vec![server_conn_id]);
+}
+
+#[test]
+fn dial_supports_dns4_target_for_quic_transport() {
+    let (mut server, mut client, peer_addr, _cert_dir) = setup_pair();
+
+    let port = match peer_addr.transport().protocols().get(1) {
+        Some(Protocol::Udp(port)) => *port,
+        _ => panic!("peer transport must contain udp port"),
+    };
+
+    let dns_transport = Multiaddr::from_protocols(vec![
+        Protocol::Dns4("localhost".to_string()),
+        Protocol::Udp(port),
+        Protocol::QuicV1,
+    ]);
+    let dns_peer_addr =
+        PeerAddr::new(dns_transport, peer_addr.peer_id().clone()).expect("dns peer addr");
+
+    let conn_id = ConnectionId::new(77);
+    client.dial(conn_id, &dns_peer_addr).expect("dial via dns4");
+
+    let connected =
+        wait_for_client_connection(&mut server, &mut client, conn_id, &dns_peer_addr, 200);
+    assert!(connected, "client should connect via dns4 target");
+}
+
+#[test]
+fn listen_rejects_address_mismatch_with_bound_socket() {
+    let (_cert_dir, cert_path, key_path) = generate_cert_pair();
+    let config = QuicNodeConfig::dev_listener_with_tls(&cert_path, &key_path);
+    let mut transport = QuicTransport::new(config, "127.0.0.1:0").expect("bind");
+
+    let local = transport.local_addr().expect("local addr");
+    let mismatched_port = if local.port() == u16::MAX {
+        local.port() - 1
+    } else {
+        local.port() + 1
+    };
+
+    let listen_ma = make_listen_multiaddr(mismatched_port);
+    let err = transport
+        .listen(&listen_ma)
+        .expect_err("listen with mismatched address should fail");
+
+    assert!(matches!(
+        err,
+        TransportError::InvalidAddress {
+            context: "listen address",
+            ..
+        }
+    ));
+
+    let events = transport.poll().expect("poll should still work");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, TransportEvent::Listening { .. })),
+        "listening event must not be emitted on failed listen"
+    );
+}
+
+#[test]
+fn peer_send_policy_prefers_connection_age_over_connection_id_order() {
+    let (mut server, mut client, peer_addr, _cert_dir) = setup_pair();
+
+    let older_conn = ConnectionId::new(100);
+    let newer_conn = ConnectionId::new(1);
+
+    client
+        .dial(older_conn, &peer_addr)
+        .expect("dial older conn");
+    let older_connected =
+        wait_for_client_connection(&mut server, &mut client, older_conn, &peer_addr, 250);
+    assert!(older_connected, "older connection should establish");
+
+    client
+        .dial(newer_conn, &peer_addr)
+        .expect("dial newer conn");
+    let newer_connected =
+        wait_for_client_connection(&mut server, &mut client, newer_conn, &peer_addr, 250);
+    assert!(newer_connected, "newer connection should establish");
+
+    let used_primary = client
+        .send_to_peer(
+            peer_addr.peer_id(),
+            b"primary-oldest".to_vec(),
+            PeerSendPolicy::Primary,
+        )
+        .expect("send with primary policy");
+    let used_oldest = client
+        .send_to_peer(
+            peer_addr.peer_id(),
+            b"explicit-oldest".to_vec(),
+            PeerSendPolicy::OldestConnected,
+        )
+        .expect("send with oldest policy");
+    let used_newest = client
+        .send_to_peer(
+            peer_addr.peer_id(),
+            b"newest".to_vec(),
+            PeerSendPolicy::NewestConnected,
+        )
+        .expect("send with newest policy");
+
+    assert_eq!(used_primary, older_conn);
+    assert_eq!(used_oldest, older_conn);
+    assert_eq!(used_newest, newer_conn);
+}
+
+#[test]
+fn large_payload_is_delivered_as_single_received_event() {
+    let (mut server, mut client, peer_addr, _cert_dir) = setup_pair();
+
+    let conn_id = ConnectionId::new(501);
+    client.dial(conn_id, &peer_addr).expect("dial");
+    let connected = wait_for_client_connection(&mut server, &mut client, conn_id, &peer_addr, 250);
+    assert!(connected, "client should connect");
+
+    let payload = vec![42u8; 32 * 1024];
+    client
+        .send(conn_id, payload.clone())
+        .expect("send large payload");
+
+    for _ in 0..250 {
+        let (server_events, _) = drive_pair_once(&mut server, &mut client);
+
+        let received: Vec<Vec<u8>> = server_events
+            .into_iter()
+            .filter_map(|event| {
+                if let TransportEvent::Received { data, .. } = event {
+                    Some(data)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if !received.is_empty() {
+            assert_eq!(received.len(), 1, "payload should arrive as one message");
+            assert_eq!(received[0], payload, "payload bytes should be preserved");
+            return;
+        }
+    }
+
+    panic!("server did not receive large payload in time");
 }

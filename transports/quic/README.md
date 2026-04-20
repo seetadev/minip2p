@@ -12,7 +12,9 @@ No async runtime required. The host calls `poll()` in their own loop.
 - Server-side incoming connection detection.
 - Peer-aware endpoint events (`peer_id` is optional for inbound connections).
 - Explicit identity-upgrade hook via `verify_connection_peer_id(...)`.
-- Bidirectional stream send/recv.
+- Length-prefixed message framing for `send`/`Received` payload boundaries.
+- Dial supports `/ip4`, `/ip6`, `/dns`, `/dns4`, and `/dns6` QUIC transport addresses.
+- `listen()` validates the requested `/ip4|ip6/.../udp/.../quic-v1` address against the bound socket.
 - Multiple concurrent connections per peer.
 - Peer-level send API with connection selection policy.
 - Node-centric config API with listener/dialer role helpers.

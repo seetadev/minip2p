@@ -1,5 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
-use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
 
 use minip2p_core::{Multiaddr, PeerAddr, PeerId, Protocol};
 use minip2p_transport::{
@@ -15,10 +15,10 @@ pub use config::QuicNodeConfig;
 
 use connection::QuicConnection;
 
-fn extract_socket_addr(
+fn extract_quic_host_and_port(
     multiaddr: &Multiaddr,
     context: &'static str,
-) -> Result<SocketAddr, TransportError> {
+) -> Result<(Protocol, u16), TransportError> {
     if !multiaddr.is_quic_transport() {
         return Err(TransportError::InvalidAddress {
             context,
@@ -27,35 +27,134 @@ fn extract_socket_addr(
     }
 
     let protocols = multiaddr.protocols();
-    let mut ip: Option<IpAddr> = None;
-    let mut port: Option<u16> = None;
 
-    for proto in protocols {
-        match proto {
-            Protocol::Ip4(bytes) => {
-                ip = Some(IpAddr::from(*bytes));
-            }
-            Protocol::Ip6(bytes) => {
-                ip = Some(IpAddr::from(*bytes));
-            }
-            Protocol::Udp(p) => {
-                port = Some(*p);
-            }
-            _ => {}
+    let host = protocols
+        .first()
+        .ok_or_else(|| TransportError::InvalidAddress {
+            context,
+            reason: "missing host component".into(),
+        })?;
+
+    let port = match protocols.get(1) {
+        Some(Protocol::Udp(port)) => *port,
+        _ => {
+            return Err(TransportError::InvalidAddress {
+                context,
+                reason: "missing udp port".into(),
+            });
         }
-    }
+    };
 
-    let ip = ip.ok_or_else(|| TransportError::InvalidAddress {
-        context,
-        reason: "missing host component".into(),
-    })?;
+    Ok((host.clone(), port))
+}
 
-    let port = port.ok_or_else(|| TransportError::InvalidAddress {
-        context,
-        reason: "missing udp port".into(),
-    })?;
+fn extract_listen_socket_addr(
+    multiaddr: &Multiaddr,
+    context: &'static str,
+) -> Result<SocketAddr, TransportError> {
+    let (host, port) = extract_quic_host_and_port(multiaddr, context)?;
+
+    let ip = match host {
+        Protocol::Ip4(bytes) => IpAddr::from(bytes),
+        Protocol::Ip6(bytes) => IpAddr::from(bytes),
+        Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_) => {
+            return Err(TransportError::InvalidAddress {
+                context,
+                reason: "listen requires /ip4 or /ip6 host (dns names are dial-only)".into(),
+            });
+        }
+        _ => {
+            return Err(TransportError::InvalidAddress {
+                context,
+                reason: "missing host component".into(),
+            });
+        }
+    };
 
     Ok(SocketAddr::new(ip, port))
+}
+
+fn resolve_dial_socket_addr(
+    multiaddr: &Multiaddr,
+    context: &'static str,
+) -> Result<SocketAddr, TransportError> {
+    let (host, port) = extract_quic_host_and_port(multiaddr, context)?;
+
+    match host {
+        Protocol::Ip4(bytes) => Ok(SocketAddr::new(IpAddr::from(bytes), port)),
+        Protocol::Ip6(bytes) => Ok(SocketAddr::new(IpAddr::from(bytes), port)),
+        Protocol::Dns(host) => {
+            let query = format!("{host}:{port}");
+            let mut resolved =
+                query
+                    .to_socket_addrs()
+                    .map_err(|e| TransportError::InvalidAddress {
+                        context,
+                        reason: format!("dns resolution failed for {query}: {e}"),
+                    })?;
+
+            resolved
+                .next()
+                .ok_or_else(|| TransportError::InvalidAddress {
+                    context,
+                    reason: format!("dns resolution returned no usable address for {query}"),
+                })
+        }
+        Protocol::Dns4(host) => {
+            let query = format!("{host}:{port}");
+            let mut resolved = query
+                .to_socket_addrs()
+                .map_err(|e| TransportError::InvalidAddress {
+                    context,
+                    reason: format!("dns resolution failed for {query}: {e}"),
+                })?
+                .filter(SocketAddr::is_ipv4);
+
+            resolved
+                .next()
+                .ok_or_else(|| TransportError::InvalidAddress {
+                    context,
+                    reason: format!("dns resolution returned no ipv4 address for {query}"),
+                })
+        }
+        Protocol::Dns6(host) => {
+            let query = format!("{host}:{port}");
+            let mut resolved = query
+                .to_socket_addrs()
+                .map_err(|e| TransportError::InvalidAddress {
+                    context,
+                    reason: format!("dns resolution failed for {query}: {e}"),
+                })?
+                .filter(SocketAddr::is_ipv6);
+
+            resolved
+                .next()
+                .ok_or_else(|| TransportError::InvalidAddress {
+                    context,
+                    reason: format!("dns resolution returned no ipv6 address for {query}"),
+                })
+        }
+        _ => Err(TransportError::InvalidAddress {
+            context,
+            reason: "missing host component".into(),
+        }),
+    }
+}
+
+fn ensure_listen_matches_bound_socket(
+    requested: SocketAddr,
+    bound: SocketAddr,
+) -> Result<(), TransportError> {
+    if requested == bound {
+        return Ok(());
+    }
+
+    Err(TransportError::InvalidAddress {
+        context: "listen address",
+        reason: format!(
+            "listen address {requested} does not match bound socket {bound}; use the bound local_addr()"
+        ),
+    })
 }
 
 fn socket_addr_to_multiaddr(addr: SocketAddr) -> Multiaddr {
@@ -79,9 +178,11 @@ pub struct QuicTransport {
     connections: HashMap<ConnectionId, QuicConnection>,
     cid_to_connection: HashMap<Vec<u8>, ConnectionId>,
     peer_connections: HashMap<PeerId, BTreeSet<ConnectionId>>,
+    connection_connected_seq: HashMap<ConnectionId, u64>,
     pending_events: Vec<TransportEvent>,
     listen_addr: Option<SocketAddr>,
     next_connection_id: u64,
+    next_connected_seq: u64,
     node_config: QuicNodeConfig,
 }
 
@@ -139,9 +240,11 @@ impl QuicTransport {
             connections: HashMap::new(),
             cid_to_connection: HashMap::new(),
             peer_connections: HashMap::new(),
+            connection_connected_seq: HashMap::new(),
             pending_events: Vec::new(),
             listen_addr: None,
             next_connection_id: 1,
+            next_connected_seq: 1,
             node_config,
         })
     }
@@ -256,6 +359,16 @@ impl QuicTransport {
         self.peer_connections.entry(peer_id).or_default().insert(id);
     }
 
+    fn note_connection_established(&mut self, id: ConnectionId) {
+        if self.connection_connected_seq.contains_key(&id) {
+            return;
+        }
+
+        let seq = self.next_connected_seq;
+        self.next_connected_seq = self.next_connected_seq.wrapping_add(1);
+        self.connection_connected_seq.insert(id, seq);
+    }
+
     fn remove_peer_connection(&mut self, peer_id: &PeerId, id: ConnectionId) {
         let mut remove_entry = false;
 
@@ -283,17 +396,27 @@ impl QuicTransport {
         };
 
         match policy {
-            PeerSendPolicy::Primary | PeerSendPolicy::OldestConnected => {
-                ids.iter().find(|id| is_connected(id)).copied()
-            }
-            PeerSendPolicy::NewestConnected => {
-                ids.iter().rev().find(|id| is_connected(id)).copied()
-            }
+            PeerSendPolicy::Primary | PeerSendPolicy::OldestConnected => ids
+                .iter()
+                .filter(|id| is_connected(id))
+                .min_by_key(|id| {
+                    self.connection_connected_seq
+                        .get(id)
+                        .copied()
+                        .unwrap_or(u64::MAX)
+                })
+                .copied(),
+            PeerSendPolicy::NewestConnected => ids
+                .iter()
+                .filter(|id| is_connected(id))
+                .max_by_key(|id| self.connection_connected_seq.get(id).copied().unwrap_or(0))
+                .copied(),
         }
     }
 
     fn unindex_connection(&mut self, id: ConnectionId, peer_id: Option<PeerId>) {
         self.cid_to_connection.retain(|_, mapped| *mapped != id);
+        self.connection_connected_seq.remove(&id);
 
         if let Some(peer_id) = peer_id {
             self.remove_peer_connection(&peer_id, id);
@@ -307,7 +430,7 @@ impl Transport for QuicTransport {
             return Err(TransportError::ConnectionExists { id });
         }
 
-        let peer_socket = extract_socket_addr(addr.transport(), "dial target")?;
+        let peer_socket = resolve_dial_socket_addr(addr.transport(), "dial target")?;
         let local_socket = self.local_addr()?;
 
         let scid = Self::generate_scid().map_err(|e| TransportError::DialFailed {
@@ -367,7 +490,7 @@ impl Transport for QuicTransport {
     }
 
     fn listen(&mut self, addr: &Multiaddr) -> Result<(), TransportError> {
-        let socket_addr = extract_socket_addr(addr, "listen address")?;
+        let socket_addr = extract_listen_socket_addr(addr, "listen address")?;
 
         if !self.node_config.can_listen() {
             return Err(TransportError::InvalidConfig {
@@ -375,9 +498,13 @@ impl Transport for QuicTransport {
             });
         }
 
-        self.listen_addr = Some(socket_addr);
-        self.pending_events
-            .push(TransportEvent::Listening { addr: addr.clone() });
+        let local_addr = self.local_addr()?;
+        ensure_listen_matches_bound_socket(socket_addr, local_addr)?;
+
+        self.listen_addr = Some(local_addr);
+        self.pending_events.push(TransportEvent::Listening {
+            addr: socket_addr_to_multiaddr(local_addr),
+        });
 
         Ok(())
     }
@@ -415,6 +542,7 @@ impl Transport for QuicTransport {
     fn poll(&mut self) -> Result<Vec<TransportEvent>, TransportError> {
         let mut buf = [0u8; 65535];
         let mut events = std::mem::take(&mut self.pending_events);
+        let mut newly_connected_ids = Vec::new();
 
         loop {
             let (len, from) = match self.socket.recv_from(&mut buf) {
@@ -500,15 +628,26 @@ impl Transport for QuicTransport {
 
             if let Some(id) = target_conn_id {
                 let mut source_cid: Option<Vec<u8>> = None;
+                let mut became_connected = false;
                 if let Some(conn) = self.connections.get_mut(&id) {
+                    let was_connected = conn.is_connected();
                     conn.recv_packet(packet, from, local_addr, &self.socket, &mut events)?;
                     source_cid = Some(conn.source_cid_bytes());
+                    became_connected = !was_connected && conn.is_connected();
                 }
 
                 if let Some(source_cid) = source_cid {
                     self.cid_to_connection.insert(source_cid, id);
                 }
+
+                if became_connected {
+                    newly_connected_ids.push(id);
+                }
             }
+        }
+
+        for id in newly_connected_ids {
+            self.note_connection_established(id);
         }
 
         let mut to_remove = Vec::new();

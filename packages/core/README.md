@@ -2,12 +2,12 @@
 
 Small, `no_std`-friendly core primitives for minip2p.
 
-This crate currently focuses on typed address handling for a QUIC-first stack.
+This crate focuses on typed address handling and peer-qualified endpoint types.
 
 ## Features
 
 - `Multiaddr` parsing/formatting for a minimal protocol set.
-- `PeerAddr` helper for validated `transport + peer id` addresses.
+- `PeerAddr` helper for validated `transport + peer id` addresses with terminal `/p2p/<peer-id>`.
 - Typed error model with actionable parse context.
 - `no_std` support (`alloc`-based), with `std` enabled by default.
 
@@ -65,4 +65,5 @@ minip2p-core = { path = "packages/core", default-features = false }
 
 This crate intentionally does not include runtime networking, DNS resolution,
 or protocol handlers. It provides stable typed building blocks for higher-level
-transport/protocol crates.
+transport/protocol crates, and it does not enforce transport-specific address
+shapes (that validation belongs in transport adapters).
