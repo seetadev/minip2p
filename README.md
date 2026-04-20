@@ -9,12 +9,14 @@ A minimal, educational [libp2p](https://libp2p.io/) implementation in Rust, desi
 
 ## Current status
 
-This repository is an early-stage workspace with two crates:
+This repository is an early-stage workspace with four crates:
 
 - `packages/identity` (`minip2p-identity`): implemented and tested.
-- `packages/core` (`minip2p-core`): scaffold crate for shared types/logic.
+- `packages/core` (`minip2p-core`): shared types (`Multiaddr`, `PeerAddr`, `PeerId` re-export).
+- `packages/transport` (`minip2p-transport`): sans-IO transport trait + connection types/events.
+- `transports/quic` (`minip2p-quic`): synchronous QUIC adapter built on `quiche`.
 
-At the moment, the identity crate is the main functional piece; swarm/transport/protocol crates are not yet in this workspace.
+The stack now supports local two-peer QUIC connectivity and byte exchange in integration tests.
 
 ## Quick start
 

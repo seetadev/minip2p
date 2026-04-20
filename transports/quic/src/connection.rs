@@ -1,7 +1,8 @@
 use std::net::{SocketAddr, UdpSocket};
 
-use minip2p_transport::{ConnectionId, ConnectionState, TransportEvent};
-use quiche::ConnectionId as QuicConnectionId;
+use minip2p_transport::{
+    ConnectionEndpoint, ConnectionId, ConnectionState, TransportError, TransportEvent,
+};
 
 const SEND_BUF_SIZE: usize = 1350;
 
@@ -9,30 +10,36 @@ pub struct QuicConnection {
     id: ConnectionId,
     conn: quiche::Connection,
     peer_addr: SocketAddr,
+    endpoint: ConnectionEndpoint,
     state: ConnectionState,
 }
 
 impl QuicConnection {
-    pub fn new(id: ConnectionId, conn: quiche::Connection, peer_addr: SocketAddr) -> Self {
+    pub fn new(
+        id: ConnectionId,
+        conn: quiche::Connection,
+        peer_addr: SocketAddr,
+        endpoint: ConnectionEndpoint,
+    ) -> Self {
         Self {
             id,
             conn,
             peer_addr,
+            endpoint,
             state: ConnectionState::Connecting,
         }
     }
 
+    pub fn source_cid_bytes(&self) -> Vec<u8> {
+        self.conn.source_id().as_ref().to_vec()
+    }
+
+    pub fn endpoint(&self) -> &ConnectionEndpoint {
+        &self.endpoint
+    }
+
     pub fn state(&self) -> ConnectionState {
         self.state
-    }
-
-    pub fn matches_dcid(&self, dcid: &QuicConnectionId) -> bool {
-        let source_id = self.conn.source_id();
-        &source_id == dcid
-    }
-
-    pub fn matches_peer(&self, addr: SocketAddr) -> bool {
-        self.peer_addr == addr
     }
 
     pub fn is_closed(&self) -> bool {
@@ -46,7 +53,7 @@ impl QuicConnection {
         local: SocketAddr,
         socket: &UdpSocket,
         events: &mut Vec<TransportEvent>,
-    ) -> Result<(), minip2p_transport::TransportError> {
+    ) -> Result<(), TransportError> {
         let recv_info = quiche::RecvInfo { from, to: local };
 
         match self.conn.recv(buf, recv_info) {
@@ -65,10 +72,9 @@ impl QuicConnection {
             self.state = ConnectionState::Connected;
             self.flush(socket)?;
 
-            let peer_addr = build_peer_addr_event(self.peer_addr);
             events.push(TransportEvent::Connected {
                 id: self.id,
-                addr: peer_addr,
+                endpoint: self.endpoint.clone(),
             });
         } else {
             self.flush(socket)?;
@@ -77,16 +83,12 @@ impl QuicConnection {
         Ok(())
     }
 
-    pub fn send_data(
-        &mut self,
-        data: &[u8],
-        socket: &UdpSocket,
-    ) -> Result<(), minip2p_transport::TransportError> {
+    pub fn send_data(&mut self, data: &[u8], socket: &UdpSocket) -> Result<(), TransportError> {
         let stream_id = if self.conn.is_server() { 1 } else { 0 };
 
         self.conn
             .stream_send(stream_id, data, false)
-            .map_err(|e| minip2p_transport::TransportError::SendFailed {
+            .map_err(|e| TransportError::SendFailed {
                 id: self.id,
                 reason: format!("stream_send error: {e}"),
             })?;
@@ -95,13 +97,10 @@ impl QuicConnection {
         Ok(())
     }
 
-    pub fn close(
-        &mut self,
-        socket: &UdpSocket,
-    ) -> Result<(), minip2p_transport::TransportError> {
+    pub fn close(&mut self, socket: &UdpSocket) -> Result<(), TransportError> {
         self.conn
             .close(true, 0x00, b"bye")
-            .map_err(|e| minip2p_transport::TransportError::CloseFailed {
+            .map_err(|e| TransportError::CloseFailed {
                 id: self.id,
                 reason: format!("close error: {e}"),
             })?;
@@ -115,7 +114,7 @@ impl QuicConnection {
         &mut self,
         events: &mut Vec<TransportEvent>,
         socket: &UdpSocket,
-    ) -> Result<(), minip2p_transport::TransportError> {
+    ) -> Result<(), TransportError> {
         if !self.conn.is_established() {
             return Ok(());
         }
@@ -140,48 +139,31 @@ impl QuicConnection {
         Ok(())
     }
 
-    fn flush(&mut self, socket: &UdpSocket) -> Result<(), minip2p_transport::TransportError> {
+    fn flush(&mut self, socket: &UdpSocket) -> Result<(), TransportError> {
         let mut out = [0u8; SEND_BUF_SIZE];
         loop {
             let (written, send_info) = match self.conn.send(&mut out) {
                 Ok(v) => v,
                 Err(quiche::Error::Done) => break,
                 Err(e) => {
-                    return Err(minip2p_transport::TransportError::SendFailed {
+                    return Err(TransportError::SendFailed {
                         id: self.id,
                         reason: format!("quiche send error: {e}"),
                     });
                 }
             };
 
-            socket
-                .send_to(&out[..written], send_info.to)
-                .map_err(|e| minip2p_transport::TransportError::SendFailed {
+            socket.send_to(&out[..written], send_info.to).map_err(|e| {
+                TransportError::SendFailed {
                     id: self.id,
                     reason: format!("udp send error: {e}"),
-                })?;
+                }
+            })?;
         }
         Ok(())
     }
-}
 
-fn build_peer_addr_event(sock_addr: SocketAddr) -> minip2p_core::PeerAddr {
-    let transport = match sock_addr {
-        SocketAddr::V4(v4) => minip2p_core::Multiaddr::from_protocols(vec![
-            minip2p_core::Protocol::Ip4(v4.ip().octets()),
-            minip2p_core::Protocol::Udp(v4.port()),
-            minip2p_core::Protocol::QuicV1,
-        ]),
-        SocketAddr::V6(v6) => minip2p_core::Multiaddr::from_protocols(vec![
-            minip2p_core::Protocol::Ip6(v6.ip().octets()),
-            minip2p_core::Protocol::Udp(v6.port()),
-            minip2p_core::Protocol::QuicV1,
-        ]),
-    };
-
-    let peer_id = minip2p_identity::PeerId::from_bytes(&[0x00, 0x04, 0x01, 0x02, 0x03, 0x04])
-        .expect("hardcoded dummy peer id must parse");
-
-    minip2p_core::PeerAddr::new(transport, peer_id)
-        .expect("hardcoded transport + peer_id must be valid")
+    pub fn matches_peer(&self, addr: SocketAddr) -> bool {
+        self.peer_addr == addr
+    }
 }

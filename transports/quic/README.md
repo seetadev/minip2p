@@ -10,7 +10,9 @@ No async runtime required. The host calls `poll()` in their own loop.
 - Synchronous, non-blocking UDP socket — no tokio, no futures.
 - Self-signed TLS certificate support via PEM files on disk.
 - Server-side incoming connection detection.
+- Peer-aware endpoint events (`peer_id` is optional for inbound connections).
 - Bidirectional stream send/recv.
+- Multiple concurrent connections per peer.
 - `verify_peer(false)` for local development and testing.
 
 ## Usage
@@ -22,6 +24,7 @@ use minip2p_core::{Multiaddr, PeerAddr, Protocol};
 use minip2p_identity::PeerId;
 use minip2p_quic::{QuicConfig, QuicTransport};
 use minip2p_transport::{ConnectionId, Transport, TransportEvent};
+use std::str::FromStr;
 
 // --- Server ---
 let server_config = QuicConfig::new()
@@ -45,10 +48,12 @@ let client_config = QuicConfig::new().verify_peer(false);
 let mut client = QuicTransport::new(client_config, "127.0.0.1:0")
     .expect("client bind");
 
-let dummy_peer_id = PeerId::from_bytes(&[0x00, 0x04, 0x01, 0x02, 0x03, 0x04])
-    .expect("peer id");
+let peer_id = PeerId::from_str(
+    "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N"
+)
+.expect("peer id");
 
-let peer_addr = PeerAddr::new(listen_addr.clone(), dummy_peer_id)
+let peer_addr = PeerAddr::new(listen_addr.clone(), peer_id)
     .expect("peer addr");
 
 let conn_id = ConnectionId::new(1);
@@ -69,14 +74,18 @@ fn drive(transport: &mut impl Transport) {
 
         for event in events {
             match event {
-                TransportEvent::Connected { id, .. } => {
-                    println!("connected: {id}");
+                TransportEvent::Connected { id, endpoint } => {
+                    if let Some(peer_id) = endpoint.peer_id() {
+                        println!("connected: {id} -> {} (peer: {peer_id})", endpoint.transport());
+                    } else {
+                        println!("connected: {id} -> {}", endpoint.transport());
+                    }
                 }
                 TransportEvent::Received { id, data } => {
                     println!("got {} bytes on {id}", data.len());
                 }
-                TransportEvent::IncomingConnection { id, .. } => {
-                    println!("incoming: {id}");
+                TransportEvent::IncomingConnection { id, endpoint } => {
+                    println!("incoming: {id} from {}", endpoint.transport());
                 }
                 TransportEvent::Closed { id } => {
                     println!("closed: {id}");
@@ -87,6 +96,31 @@ fn drive(transport: &mut impl Transport) {
         }
 
         std::thread::sleep(Duration::from_millis(1));
+    }
+}
+```
+
+### Dialing ergonomics and peer connection lookup
+
+`QuicTransport` provides convenience helpers on top of the `Transport` trait:
+
+```rust
+use minip2p_identity::PeerId;
+use minip2p_quic::QuicTransport;
+use minip2p_transport::Transport;
+
+fn connect_and_pick_primary(
+    transport: &mut QuicTransport,
+    peer_addr: &minip2p_core::PeerAddr,
+    peer_id: &PeerId,
+) {
+    let _id = transport.dial_auto(peer_addr).expect("dial");
+
+    let ids = transport.connection_ids_for_peer(peer_id);
+    println!("known connection ids for peer: {ids:?}");
+
+    if let Some(primary) = transport.primary_connection_for_peer(peer_id) {
+        println!("primary connection: {primary}");
     }
 }
 ```

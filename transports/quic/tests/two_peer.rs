@@ -1,8 +1,11 @@
+use std::collections::BTreeSet;
 use std::io::Write;
+use std::str::FromStr;
 
 use minip2p_core::{Multiaddr, PeerAddr, Protocol};
+use minip2p_identity::PeerId;
 use minip2p_quic::{QuicConfig, QuicTransport};
-use minip2p_transport::{ConnectionId, Transport, TransportEvent};
+use minip2p_transport::{ConnectionId, Transport, TransportError, TransportEvent};
 use tempfile::TempDir;
 
 fn generate_cert_pair() -> (TempDir, String, String) {
@@ -43,9 +46,12 @@ fn make_listen_multiaddr(port: u16) -> Multiaddr {
     ])
 }
 
-#[test]
-fn two_peers_connect_and_exchange_data() {
-    let (_cert_dir, cert_path, key_path) = generate_cert_pair();
+fn test_peer_id() -> PeerId {
+    PeerId::from_str("QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N").expect("peer id")
+}
+
+fn setup_pair() -> (QuicTransport, QuicTransport, PeerAddr, TempDir) {
+    let (cert_dir, cert_path, key_path) = generate_cert_pair();
 
     let server_config = QuicConfig::new()
         .with_cert_paths(&cert_path, &key_path)
@@ -53,21 +59,22 @@ fn two_peers_connect_and_exchange_data() {
 
     let client_config = QuicConfig::new().verify_peer(false);
 
-    let mut server =
-        QuicTransport::new(server_config, "127.0.0.1:0").expect("server bind");
-    let mut client =
-        QuicTransport::new(client_config, "127.0.0.1:0").expect("client bind");
+    let mut server = QuicTransport::new(server_config, "127.0.0.1:0").expect("server bind");
+    let client = QuicTransport::new(client_config, "127.0.0.1:0").expect("client bind");
 
     let server_addr = server.local_addr().expect("server local addr");
     let listen_ma = make_listen_multiaddr(server_addr.port());
 
     server.listen(&listen_ma).expect("server listen");
 
-    let dummy_peer_id =
-        minip2p_identity::PeerId::from_bytes(&[0x00, 0x04, 0x01, 0x02, 0x03, 0x04])
-            .expect("peer id");
+    let peer_addr = PeerAddr::new(listen_ma, test_peer_id()).expect("peer addr");
 
-    let peer_addr = PeerAddr::new(listen_ma, dummy_peer_id).expect("peer addr");
+    (server, client, peer_addr, cert_dir)
+}
+
+#[test]
+fn two_peers_connect_and_exchange_data() {
+    let (mut server, mut client, peer_addr, _cert_dir) = setup_pair();
 
     let client_conn_id = ConnectionId::new(1);
     client
@@ -87,9 +94,10 @@ fn two_peers_connect_and_exchange_data() {
         let server_events = server.poll().expect("server poll");
         for event in &server_events {
             match event {
-                TransportEvent::IncomingConnection { id, .. } => {
+                TransportEvent::IncomingConnection { id, endpoint } => {
                     server_got_connection = true;
                     server_conn_id = *id;
+                    assert!(endpoint.peer_id().is_none());
                 }
                 TransportEvent::Connected { id, .. } => {
                     if !server_got_connection {
@@ -108,7 +116,8 @@ fn two_peers_connect_and_exchange_data() {
         let client_events = client.poll().expect("client poll");
         for event in &client_events {
             match event {
-                TransportEvent::Connected { .. } => {
+                TransportEvent::Connected { endpoint, .. } => {
+                    assert_eq!(endpoint.peer_id(), Some(peer_addr.peer_id()));
                     client_got_connected = true;
                 }
                 TransportEvent::Received { data, .. } => {
@@ -124,7 +133,10 @@ fn two_peers_connect_and_exchange_data() {
         }
     }
 
-    assert!(server_got_connection, "server should see incoming connection");
+    assert!(
+        server_got_connection,
+        "server should see incoming connection"
+    );
     assert!(client_got_connected, "client should be connected");
 
     client
@@ -170,4 +182,114 @@ fn two_peers_connect_and_exchange_data() {
     }
 
     assert!(client_received, "client should receive server data");
+}
+
+#[test]
+fn same_peer_supports_multiple_connections() {
+    let (mut server, mut client, peer_addr, _cert_dir) = setup_pair();
+
+    let conn_a = ConnectionId::new(10);
+    let conn_b = ConnectionId::new(11);
+
+    client.dial(conn_a, &peer_addr).expect("dial conn_a");
+    client.dial(conn_b, &peer_addr).expect("dial conn_b");
+
+    let mut client_connected = BTreeSet::new();
+    let mut server_connection_ids = BTreeSet::new();
+
+    for _ in 0..400 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let server_events = server.poll().expect("server poll");
+        for event in server_events {
+            match event {
+                TransportEvent::IncomingConnection { id, endpoint } => {
+                    assert!(endpoint.peer_id().is_none());
+                    server_connection_ids.insert(id);
+                }
+                TransportEvent::Connected { id, .. } => {
+                    server_connection_ids.insert(id);
+                }
+                _ => {}
+            }
+        }
+
+        let client_events = client.poll().expect("client poll");
+        for event in client_events {
+            if let TransportEvent::Connected { id, endpoint } = event {
+                assert_eq!(endpoint.peer_id(), Some(peer_addr.peer_id()));
+                client_connected.insert(id);
+            }
+        }
+
+        if client_connected.len() == 2 && server_connection_ids.len() >= 2 {
+            break;
+        }
+    }
+
+    assert_eq!(client_connected.len(), 2, "client should connect twice");
+    assert!(
+        server_connection_ids.len() >= 2,
+        "server should track two incoming connections"
+    );
+
+    let known = client.connection_ids_for_peer(peer_addr.peer_id());
+    assert_eq!(known, vec![conn_a, conn_b]);
+    assert_eq!(
+        client.primary_connection_for_peer(peer_addr.peer_id()),
+        Some(conn_a)
+    );
+
+    client.send(conn_a, b"msg-a".to_vec()).expect("send conn_a");
+    client.send(conn_b, b"msg-b".to_vec()).expect("send conn_b");
+
+    let mut got_a = false;
+    let mut got_b = false;
+
+    for _ in 0..400 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let server_events = server.poll().expect("server poll");
+        for event in server_events {
+            if let TransportEvent::Received { data, .. } = event {
+                if data == b"msg-a" {
+                    got_a = true;
+                }
+                if data == b"msg-b" {
+                    got_b = true;
+                }
+            }
+        }
+
+        let _ = client.poll().expect("client poll");
+
+        if got_a && got_b {
+            break;
+        }
+    }
+
+    assert!(got_a, "server should receive message on conn_a");
+    assert!(got_b, "server should receive message on conn_b");
+}
+
+#[test]
+fn listen_without_tls_returns_config_error_and_no_listening_event() {
+    let config = QuicConfig::new().verify_peer(false);
+    let mut transport = QuicTransport::new(config, "127.0.0.1:0").expect("bind");
+
+    let local_port = transport.local_addr().expect("local addr").port();
+    let listen_ma = make_listen_multiaddr(local_port);
+
+    let err = transport
+        .listen(&listen_ma)
+        .expect_err("listen should fail");
+    assert!(matches!(err, TransportError::InvalidConfig { .. }));
+
+    let events = transport.poll().expect("poll should still work");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, TransportEvent::Listening { .. })),
+        "listening event must not be emitted on failed listen"
+    );
 }

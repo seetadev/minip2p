@@ -8,10 +8,11 @@ This crate defines the transport abstraction that concrete adapters (QUIC, WebSo
 
 - `Transport` trait with a `poll()`-based event model.
 - `ConnectionId` — lightweight `u64`-backed connection identifier.
+- `ConnectionEndpoint` — transport endpoint + optional remote `PeerId`.
 - `ConnectionState` — connection lifecycle: `Connecting`, `Connected`, `Closing`, `Closed`.
 - `TransportAction` — host-side intents: `Dial`, `Listen`, `Send`, `Close`.
 - `TransportEvent` — transport-side outcomes: `Connected`, `Received`, `Closed`, `Error`, `IncomingConnection`, `Listening`.
-- `TransportError` — typed errors with `ConnectionId` context.
+- `TransportError` — typed errors with connection, address, and config context.
 - `no_std` support (`alloc`-based), with `std` enabled by default.
 
 ## Usage
@@ -68,8 +69,12 @@ fn event_loop(transport: &mut impl Transport) {
 
         for event in events {
             match event {
-                TransportEvent::Connected { id, addr } => {
-                    println!("connected: {id} -> {addr}");
+                TransportEvent::Connected { id, endpoint } => {
+                    if let Some(peer_id) = endpoint.peer_id() {
+                        println!("connected: {id} -> {} (peer: {peer_id})", endpoint.transport());
+                    } else {
+                        println!("connected: {id} -> {}", endpoint.transport());
+                    }
                 }
                 TransportEvent::Received { id, data } => {
                     println!("received {} bytes on {id}", data.len());
@@ -80,8 +85,8 @@ fn event_loop(transport: &mut impl Transport) {
                 TransportEvent::Error { id, message } => {
                     eprintln!("error on {id}: {message}");
                 }
-                TransportEvent::IncomingConnection { id, addr } => {
-                    println!("incoming connection {id} from {addr}");
+                TransportEvent::IncomingConnection { id, endpoint } => {
+                    println!("incoming connection {id} from {}", endpoint.transport());
                 }
                 TransportEvent::Listening { addr } => {
                     println!("listening on {addr}");
@@ -94,13 +99,22 @@ fn event_loop(transport: &mut impl Transport) {
 
 ## Error handling
 
-All fallible methods return `Result<_, TransportError>`. Errors carry a `ConnectionId` so callers know which connection failed:
+All fallible methods return `Result<_, TransportError>`. Errors include connection, address, and configuration context so callers can act on failures quickly:
 
 ```rust
 use minip2p_transport::{ConnectionId, TransportError};
 
 fn handle_error(err: TransportError) {
     match err {
+        TransportError::InvalidAddress { context, reason } => {
+            eprintln!("invalid address for {context}: {reason}");
+        }
+        TransportError::InvalidConfig { reason } => {
+            eprintln!("invalid config: {reason}");
+        }
+        TransportError::ResourceExhausted { resource } => {
+            eprintln!("resource exhausted: {resource}");
+        }
         TransportError::ConnectionNotFound { id } => {
             eprintln!("connection {id} does not exist");
         }

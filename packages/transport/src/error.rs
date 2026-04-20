@@ -6,6 +6,15 @@ use crate::ConnectionId;
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum TransportError {
+    #[error("invalid address for {context}: {reason}")]
+    InvalidAddress {
+        context: &'static str,
+        reason: String,
+    },
+    #[error("invalid transport configuration: {reason}")]
+    InvalidConfig { reason: String },
+    #[error("resource exhausted: {resource}")]
+    ResourceExhausted { resource: &'static str },
     #[error("connection {id} not found")]
     ConnectionNotFound { id: ConnectionId },
     #[error("connection {id} already exists")]
