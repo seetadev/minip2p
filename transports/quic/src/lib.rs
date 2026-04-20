@@ -11,7 +11,7 @@ use quiche::ConnectionId as QuicConnectionId;
 mod config;
 mod connection;
 
-pub use config::QuicConfig;
+pub use config::QuicNodeConfig;
 
 use connection::QuicConnection;
 
@@ -82,11 +82,11 @@ pub struct QuicTransport {
     pending_events: Vec<TransportEvent>,
     listen_addr: Option<SocketAddr>,
     next_connection_id: u64,
-    config: QuicConfig,
+    node_config: QuicNodeConfig,
 }
 
 impl QuicTransport {
-    pub fn new(config: QuicConfig, bind_addr: &str) -> Result<Self, TransportError> {
+    pub fn new(node_config: QuicNodeConfig, bind_addr: &str) -> Result<Self, TransportError> {
         let socket = UdpSocket::bind(bind_addr).map_err(|e| TransportError::ListenFailed {
             reason: format!("failed to bind udp socket: {e}"),
         })?;
@@ -115,9 +115,9 @@ impl QuicTransport {
         quiche_config.set_initial_max_streams_bidi(100);
         quiche_config.set_max_recv_udp_payload_size(1350);
         quiche_config.set_max_send_udp_payload_size(1350);
-        quiche_config.verify_peer(config.verify_peer);
+        quiche_config.verify_peer(node_config.peer_verification());
 
-        if let Some(cert_path) = &config.cert_chain_path {
+        if let Some(cert_path) = node_config.local_cert_chain_path() {
             quiche_config
                 .load_cert_chain_from_pem_file(cert_path)
                 .map_err(|e| TransportError::ListenFailed {
@@ -125,7 +125,7 @@ impl QuicTransport {
                 })?;
         }
 
-        if let Some(key_path) = &config.priv_key_path {
+        if let Some(key_path) = node_config.local_priv_key_path() {
             quiche_config
                 .load_priv_key_from_pem_file(key_path)
                 .map_err(|e| TransportError::ListenFailed {
@@ -142,7 +142,7 @@ impl QuicTransport {
             pending_events: Vec::new(),
             listen_addr: None,
             next_connection_id: 1,
-            config,
+            node_config,
         })
     }
 
@@ -369,9 +369,9 @@ impl Transport for QuicTransport {
     fn listen(&mut self, addr: &Multiaddr) -> Result<(), TransportError> {
         let socket_addr = extract_socket_addr(addr, "listen address")?;
 
-        if self.config.cert_chain_path.is_none() || self.config.priv_key_path.is_none() {
+        if !self.node_config.can_listen() {
             return Err(TransportError::InvalidConfig {
-                reason: "server mode requires cert_chain_path and priv_key_path".into(),
+                reason: "listener role requires local TLS files; call QuicNodeConfig::with_local_tls_files(...) or QuicNodeConfig::dev_listener_with_tls(...)".into(),
             });
         }
 

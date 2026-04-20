@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use minip2p_core::{Multiaddr, PeerAddr, Protocol};
 use minip2p_identity::PeerId;
-use minip2p_quic::{QuicConfig, QuicTransport};
+use minip2p_quic::{QuicNodeConfig, QuicTransport};
 use minip2p_transport::{ConnectionId, PeerSendPolicy, Transport, TransportError, TransportEvent};
 use tempfile::TempDir;
 
@@ -53,14 +53,12 @@ fn test_peer_id() -> PeerId {
 fn setup_pair() -> (QuicTransport, QuicTransport, PeerAddr, TempDir) {
     let (cert_dir, cert_path, key_path) = generate_cert_pair();
 
-    let server_config = QuicConfig::new()
-        .with_cert_paths(&cert_path, &key_path)
-        .verify_peer(false);
+    let listener_node_config = QuicNodeConfig::dev_listener_with_tls(&cert_path, &key_path);
 
-    let client_config = QuicConfig::new().verify_peer(false);
+    let dialer_node_config = QuicNodeConfig::dev_dialer();
 
-    let mut server = QuicTransport::new(server_config, "127.0.0.1:0").expect("server bind");
-    let client = QuicTransport::new(client_config, "127.0.0.1:0").expect("client bind");
+    let mut server = QuicTransport::new(listener_node_config, "127.0.0.1:0").expect("server bind");
+    let client = QuicTransport::new(dialer_node_config, "127.0.0.1:0").expect("client bind");
 
     let server_addr = server.local_addr().expect("server local addr");
     let listen_ma = make_listen_multiaddr(server_addr.port());
@@ -289,7 +287,7 @@ fn same_peer_supports_multiple_connections() {
 
 #[test]
 fn listen_without_tls_returns_config_error_and_no_listening_event() {
-    let config = QuicConfig::new().verify_peer(false);
+    let config = QuicNodeConfig::dev_dialer();
     let mut transport = QuicTransport::new(config, "127.0.0.1:0").expect("bind");
 
     let local_port = transport.local_addr().expect("local addr").port();

@@ -15,39 +15,40 @@ No async runtime required. The host calls `poll()` in their own loop.
 - Bidirectional stream send/recv.
 - Multiple concurrent connections per peer.
 - Peer-level send API with connection selection policy.
-- `verify_peer(false)` for local development and testing.
+- Node-centric config API with listener/dialer role helpers.
 
 ## Usage
 
-### Basic server + client
+### Basic listener role + dialer role
 
 ```rust
 use minip2p_core::{Multiaddr, PeerAddr, Protocol};
 use minip2p_identity::PeerId;
-use minip2p_quic::{QuicConfig, QuicTransport};
+use minip2p_quic::{QuicNodeConfig, QuicTransport};
 use minip2p_transport::{ConnectionId, Transport, TransportEvent};
 use std::str::FromStr;
 
-// --- Server ---
-let server_config = QuicConfig::new()
-    .with_cert_paths("/path/to/cert.pem", "/path/to/key.pem")
-    .verify_peer(false);
+// --- Listener role (server-like) ---
+let listener_node_config = QuicNodeConfig::dev_listener_with_tls(
+    "/path/to/cert.pem",
+    "/path/to/key.pem",
+);
 
-let mut server = QuicTransport::new(server_config, "127.0.0.1:0")
+let mut listener = QuicTransport::new(listener_node_config, "127.0.0.1:0")
     .expect("server bind");
 
-let server_addr = server.local_addr().expect("local addr");
+let listener_addr = listener.local_addr().expect("local addr");
 let listen_addr = Multiaddr::from_protocols(vec![
     Protocol::Ip4([127, 0, 0, 1]),
-    Protocol::Udp(server_addr.port()),
+    Protocol::Udp(listener_addr.port()),
     Protocol::QuicV1,
 ]);
 
-server.listen(&listen_addr).expect("listen");
+listener.listen(&listen_addr).expect("listen");
 
-// --- Client ---
-let client_config = QuicConfig::new().verify_peer(false);
-let mut client = QuicTransport::new(client_config, "127.0.0.1:0")
+// --- Dialer role (client-like) ---
+let dialer_node_config = QuicNodeConfig::dev_dialer();
+let mut dialer = QuicTransport::new(dialer_node_config, "127.0.0.1:0")
     .expect("client bind");
 
 let peer_id = PeerId::from_str(
@@ -59,7 +60,7 @@ let peer_addr = PeerAddr::new(listen_addr.clone(), peer_id)
     .expect("peer addr");
 
 let conn_id = ConnectionId::new(1);
-client.dial(conn_id, &peer_addr).expect("dial");
+dialer.dial(conn_id, &peer_addr).expect("dial");
 ```
 
 ### Driving the event loop
@@ -192,20 +193,22 @@ fn close_connection(
 
 ## Configuration
 
-`QuicConfig` is a builder:
+`QuicNodeConfig` is a node-centric builder. The same type supports listener and dialer roles:
 
 | Method | Description |
 |--------|-------------|
-| `QuicConfig::new()` | Default config, no TLS, `verify_peer(false)`. |
-| `.with_cert_paths(cert, key)` | PEM file paths for server TLS. Required for `listen()`. |
-| `.verify_peer(bool)` | Enable/disable peer certificate verification. Default: `false`. |
+| `QuicNodeConfig::new()` | Base node config, no local TLS files, peer verification disabled. |
+| `QuicNodeConfig::dev_dialer()` | Local development dialer preset. |
+| `QuicNodeConfig::dev_listener_with_tls(cert, key)` | Local development listener preset with TLS files. |
+| `.with_local_tls_files(cert, key)` | Set PEM paths for local listener identity. Required for `listen()`. |
+| `.with_peer_verification(bool)` | Enable/disable peer certificate verification. Default: `false`. |
 
 ```rust
-use minip2p_quic::QuicConfig;
+use minip2p_quic::QuicNodeConfig;
 
-let config = QuicConfig::new()
-    .with_cert_paths("cert.pem", "key.pem")
-    .verify_peer(true);
+let config = QuicNodeConfig::new()
+    .with_local_tls_files("cert.pem", "key.pem")
+    .with_peer_verification(true);
 ```
 
 ## TLS certificates
