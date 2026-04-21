@@ -149,47 +149,113 @@ pub fn run_listen(relay_addr: PeerAddr) -> Result<(), Box<dyn Error>> {
     let punch_deadline = punch_start + HOLEPUNCH_DEADLINE;
     let mut next_blast = punch_start + RESPONDER_SYNC_DELAY;
 
-    let punched = loop {
+    let outcome = loop {
         let now = Instant::now();
         if now >= punch_deadline {
-            break None;
+            break HolePunchOutcome::Timeout;
         }
         if now >= next_blast {
             blast_remote_addrs(&swarm, &remote_addrs, role);
             next_blast = now + HOLEPUNCH_INTERVAL;
         }
-        // Small tick window; returns `None` if no event, which is fine.
-        if let Some(ev) =
-            swarm.run_until(now + HOLEPUNCH_INTERVAL, |ev| {
+        // Short tick window. In addition to a direct
+        // ConnectionEstablished for the remote, we also return on the
+        // bridge stream being closed by the relay -- that happens after
+        // the remote successfully goes direct and stops using the
+        // circuit, and without mutual TLS we can't detect the direct
+        // connection ourselves (see holepunch-plan.md Milestone 6).
+        let Some(ev) = swarm
+            .run_until(now + HOLEPUNCH_INTERVAL, |ev| {
                 print_event(role, ev);
-                matches!(
-                    ev,
-                    SwarmEvent::ConnectionEstablished { peer_id }
-                        if peer_id == &remote_peer_id
-                )
-            }).map_err(|e| format!("holepunch poll: {e}"))?
-        {
-            let SwarmEvent::ConnectionEstablished { peer_id } = ev else {
-                unreachable!()
-            };
-            break Some(peer_id);
+                is_direct_connection_event(ev, &remote_peer_id)
+                    || is_bridge_closed_event(ev, bridge_stream)
+            })
+            .map_err(|e| format!("holepunch poll: {e}"))?
+        else {
+            continue;
+        };
+        match ev {
+            SwarmEvent::ConnectionEstablished { peer_id } => {
+                break HolePunchOutcome::DirectConnected(peer_id);
+            }
+            _ => break HolePunchOutcome::BridgeClosed,
         }
     };
 
-    // --- 7. Direct ping or relay-echo fallback ------------------------------
-    if let Some(peer_id) = punched {
-        println!("[{role}] direct-connected peer={peer_id} (hole-punch success)");
-        ping_and_exit(&mut swarm, role, peer_id, deadline)
-    } else {
-        println!("[{role}] hole-punch-timeout -> relay-ping fallback");
-        // Echo any payload that arrives on the bridge so Peer A can
-        // measure an RTT. Exit when the process is killed or the
-        // top-level deadline elapses.
-        loop {
-            let data = wait_user_stream_data(&mut swarm, role, bridge_stream, deadline)?;
-            send(&mut swarm, &relay_peer_id, bridge_stream, data)?;
+    // --- 7. Resolve based on the hole-punch outcome -------------------------
+    match outcome {
+        HolePunchOutcome::DirectConnected(peer_id) => {
+            println!("[{role}] direct-connected peer={peer_id} (hole-punch success)");
+            ping_and_exit(&mut swarm, role, peer_id, deadline)
+        }
+        HolePunchOutcome::BridgeClosed => {
+            // Relay closed the circuit. Most likely the remote went
+            // direct and no longer needs the bridge; we just can't
+            // confirm that independently without mutual TLS on the
+            // QUIC server side. Exit cleanly.
+            println!(
+                "[{role}] bridge-closed (remote likely completed via direct path; \
+                 mTLS gap prevents confirmation) -- done"
+            );
+            Ok(())
+        }
+        HolePunchOutcome::Timeout => {
+            println!("[{role}] hole-punch-timeout -> relay-ping fallback");
+            // Wait for either an echo payload from Peer A or the
+            // bridge to close (meaning A gave up). A short fallback
+            // deadline keeps the listener from hanging indefinitely
+            // if the relay GC'd the circuit while we weren't looking.
+            let fallback_deadline = Instant::now() + Duration::from_secs(5);
+            let ev = swarm
+                .run_until(fallback_deadline, |ev| {
+                    print_event(role, ev);
+                    matches!(
+                        ev,
+                        SwarmEvent::UserStreamData { stream_id: s, .. } if *s == bridge_stream
+                    ) || is_bridge_closed_event(ev, bridge_stream)
+                })
+                .map_err(|e| format!("fallback poll: {e}"))?;
+            match ev {
+                Some(SwarmEvent::UserStreamData { data, .. }) => {
+                    send(&mut swarm, &relay_peer_id, bridge_stream, data)?;
+                    println!("[{role}] relay-ping-echoed -- done");
+                    Ok(())
+                }
+                Some(_) => {
+                    println!("[{role}] bridge-closed during fallback -- done");
+                    Ok(())
+                }
+                None => Err("fallback deadline exceeded before any bridge activity".into()),
+            }
         }
     }
+}
+
+/// Terminal states the listener's hole-punch loop can resolve to.
+enum HolePunchOutcome {
+    /// Saw `ConnectionEstablished` for the remote peer id (only
+    /// possible once mutual TLS is implemented; see Milestone 6).
+    DirectConnected(PeerId),
+    /// Relay closed the bridge stream -- strong signal that the
+    /// remote went direct and stopped using the circuit.
+    BridgeClosed,
+    /// Neither of the above happened within `HOLEPUNCH_DEADLINE`.
+    Timeout,
+}
+
+fn is_direct_connection_event(ev: &SwarmEvent, remote: &PeerId) -> bool {
+    matches!(ev, SwarmEvent::ConnectionEstablished { peer_id } if peer_id == remote)
+}
+
+fn is_bridge_closed_event(ev: &SwarmEvent, bridge_stream: StreamId) -> bool {
+    matches!(
+        ev,
+        SwarmEvent::UserStreamRemoteWriteClosed { stream_id, .. }
+            if *stream_id == bridge_stream
+    ) || matches!(
+        ev,
+        SwarmEvent::UserStreamClosed { stream_id, .. } if *stream_id == bridge_stream
+    )
 }
 
 // ---------------------------------------------------------------------------
