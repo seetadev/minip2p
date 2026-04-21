@@ -24,16 +24,13 @@ Implemented crates:
 Current validated capabilities:
 
 - Local two-peer QUIC connectivity in integration tests.
-- Bidirectional stream data exchange.
-- Stream half-close/write-close event flow.
-- Multiple connections per peer.
-- Identity upgrade event flow and peer index updates.
-- Multistream-select protocol negotiation with spec-compliant varint-length-prefixed framing.
+- Bidirectional stream data exchange with half-close propagation.
+- Multistream-select with spec-compliant varint-length-prefixed framing.
 - Ping protocol: outbound RTT measurement, inbound echo, fragmentation buffering, configurable timeouts.
 - End-to-end protocol stack: QUIC transport + multistream-select + ping in integration tests.
-- Varint helpers (`read_uvarint`, `write_uvarint`, `uvarint_len`) shared via `minip2p-identity` and re-exported through `minip2p-core`.
-- Rustdoc on all public APIs across all 6 crates.
-- Internal comments on all private functions, types, and fields for contributor onboarding.
+- Transport contract with documented lifecycle guarantees and 12 conformance tests.
+- Varint helpers shared via `minip2p-identity` and re-exported through `minip2p-core`.
+- Rustdoc on all public APIs. Internal comments on all private functions and types.
 
 ## Architecture Boundaries
 
@@ -42,6 +39,7 @@ Current validated capabilities:
 - `packages/identity`: peer identity primitives.
 - `packages/core`: transport-agnostic address and shared types.
 - `packages/transport`: transport contract, shared connection/event/error types.
+- `packages/tls`: libp2p TLS certificate generation and peer verification. Transport-agnostic.
 
 ### Runtime adapters (`std`)
 
@@ -82,49 +80,65 @@ Current validated capabilities:
 **Exit criteria**
 - New contributors can run tests and explain crate boundaries in under 10 minutes.
 
-### Milestone 1: Transport contract hardening
+### Milestone 1: Transport contract hardening -- DONE
 
-- Refine transport guarantees (message semantics, event ordering, close behavior).
-- Ensure shared error taxonomy is adapter-agnostic and actionable.
-- Add conformance tests for transport contract behavior.
+- [x] Document connection lifecycle, stream lifecycle, and event ordering on Transport trait.
+- [x] Add 12 conformance tests for transport contract behavior.
+- [x] Fix ping memory leak (`entry().or_default()`), stale state, dead error variant.
 
 **Exit criteria**
 - Shared transport behavior is explicit and test-backed.
 
-### Milestone 2: QUIC DX polish
+### Milestone 2: libp2p TLS peer authentication
 
-- Improve QUIC docs and ergonomics for local development.
-- Tighten diagnostics around dial/listen/send/close failures.
-- Keep integration tests stable and deterministic.
+New crate: `packages/tls` (`minip2p-tls`) -- `no_std + alloc` compatible.
 
-**Exit criteria**
-- New users can run QUIC examples/tests with minimal setup and clear feedback.
-
-### Milestone 3: Additional transport adapters
-
-- Add `transports/tcp` and `transports/ws` prototypes aligned to shared contract.
-- Validate adapter parity for key lifecycle and send/receive behaviors.
-- Plan WebRTC adapter shape and required browser/runtime bridges.
+- Add `minip2p-tls` crate for cert generation and verification per the libp2p TLS spec.
+- Generate self-signed X.509 certs with embedded libp2p public key (OID `1.3.6.1.4.1.53594.1.1`).
+- Verify peer certs after TLS handshake and derive PeerId automatically.
+- Wire into QUIC transport: accept `Ed25519Keypair`, auto-verify on connect.
+- Validate against libp2p TLS spec test vectors (Ed25519, ECDSA, secp256k1).
+- Transport-agnostic: reusable by future TCP/WS/WebRTC adapters.
+- Dependencies: `x509-cert` (RustCrypto, `no_std`) for cert building, `der` for DER parsing.
 
 **Exit criteria**
-- At least one non-QUIC transport reaches local two-peer connectivity parity.
+- Two QUIC peers connect and automatically know each other's PeerId without manual verification.
+- Spec test vectors pass.
 
-### Milestone 4: Core protocols
+### Milestone 3: Identify protocol
 
-- Add Noise XX handshake state machine.
-- [x] Add ping protocol with deterministic events and RTT measurement.
-- [x] Add multistream-select with spec-compliant varint framing.
-- Add identify protocol.
-- Start gossipsub baseline after ping/identify stabilization.
+- Add `packages/identify` for `/ipfs/id/1.0.0`.
+- Peers exchange supported protocols, observed addresses, agent version after connecting.
+- Required foundation for relay and hole punch (peers need to know each other's addresses).
 
 **Exit criteria**
-- Ping and identify are visible through stable host-facing events.
+- After connecting, both peers learn each other's supported protocols and observed address.
 
-### Milestone 5: Swarm, FFI, and operational polish
+### Milestone 4: Swarm and connection management
 
-- Introduce swarm orchestration and clearer action/event plumbing.
-- Design FFI-safe boundaries for JS/WASM embedding.
-- Expand troubleshooting docs and runnable examples.
+- Introduce a swarm layer that orchestrates connections, protocol negotiation, and address tracking.
+- Handle "connect to peer X" by picking transport, negotiating protocols, managing lifecycle.
+- Required before relay (relay needs to manage multiple connections per peer).
+
+**Exit criteria**
+- A swarm connects two peers, negotiates protocols, and runs ping without manual wiring.
+
+### Milestone 5: Relay and NAT traversal
+
+- Add relay protocol: peers connect through a public relay server.
+- Add STUN client for public address discovery.
+- Add DCUtR / hole punch: attempt direct UDP connection, fall back to relay.
+- Relay server binary.
+
+**Exit criteria**
+- Two peers behind NAT can ping each other via relay, with hole punch attempted for direct path.
+
+### Milestone 6: Additional transports and operational polish
+
+- TCP + TLS transport adapter (reuses `minip2p-tls`).
+- WebSocket transport adapter.
+- FFI boundaries for WASM/TypeScript.
+- Runnable examples and troubleshooting docs.
 
 **Exit criteria**
 - One end-to-end example runs from docs without hidden steps.
@@ -133,7 +147,7 @@ Current validated capabilities:
 
 - Unit tests for core parsing/types and error behavior.
 - Integration tests for two-peer connectivity per transport.
-- `cargo check --no-default-features` for `packages/identity`, `packages/core`, and `packages/transport`.
+- `cargo check --no-default-features` for `packages/identity`, `packages/core`, `packages/transport`, and `packages/tls`.
 - Stable, documented error messages for common misconfiguration paths.
 - Dependency and footprint discipline for core crates.
 
@@ -147,3 +161,7 @@ Current validated capabilities:
 - Varint helpers live in `minip2p-identity` (public) and are re-exported through `minip2p-core` to avoid circular deps.
 - `multistream-select` depends on `minip2p-core` for shared varint code rather than duplicating it.
 - Dropped `segment` index fields from `MultiaddrError`/`PeerAddrError` -- the protocol name and value in the error message are sufficient context.
+- Use `x509-cert` (RustCrypto) for cert generation/verification -- `no_std + alloc` compatible, replaces `rcgen` (std-only).
+- `minip2p-tls` is transport-agnostic: generates and verifies libp2p TLS certs, reusable across QUIC/TCP/WS.
+- Follow the libp2p TLS spec for QUIC peer authentication -- QUIC's built-in TLS handles encryption, Noise XX would be redundant.
+- Relay-first approach for NAT traversal, with hole punch (DCUtR) as optimization on top.
