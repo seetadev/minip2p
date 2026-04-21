@@ -9,6 +9,7 @@ extern crate alloc;
 
 use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 use minip2p_core::{read_uvarint, uvarint_len, write_uvarint, VarintError};
 use thiserror::Error;

@@ -8,7 +8,9 @@
 extern crate alloc;
 
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::format;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use minip2p_core::PeerId;

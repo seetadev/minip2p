@@ -624,6 +624,7 @@ dependencies = [
  "minip2p-ping",
  "minip2p-relay",
  "minip2p-transport",
+ "thiserror",
 ]
 
 [[package]]
