@@ -542,6 +542,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "minip2p-identify"
+version = "0.1.0"
+dependencies = [
+ "minip2p-core",
+ "minip2p-transport",
+ "thiserror",
+]
+
+[[package]]
 name = "minip2p-identity"
 version = "0.1.0"
 dependencies = [
