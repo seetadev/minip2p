@@ -390,12 +390,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "minip2p-multistream-select"
+version = "0.1.0"
+dependencies = [
+ "minip2p-core",
+ "thiserror",
+]
+
+[[package]]
+name = "minip2p-ping"
+version = "0.1.0"
+dependencies = [
+ "minip2p-core",
+ "minip2p-transport",
+ "thiserror",
+]
+
+[[package]]
 name = "minip2p-quic"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
  "minip2p-core",
  "minip2p-identity",
+ "minip2p-multistream-select",
+ "minip2p-ping",
  "minip2p-transport",
  "quiche",
  "rcgen",

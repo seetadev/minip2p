@@ -16,14 +16,17 @@ Implemented crates:
 
 - `packages/identity` (`minip2p-identity`)
 - `packages/core` (`minip2p-core`)
+- `packages/multistream-select` (`minip2p-multistream-select`)
+- `packages/ping` (`minip2p-ping`)
 - `packages/transport` (`minip2p-transport`)
 - `transports/quic` (`minip2p-quic`)
 
 Current validated capabilities:
 
 - Local two-peer QUIC connectivity in integration tests.
-- Bidirectional byte exchange.
-- Multiple connections per peer with policy-based selection.
+- Bidirectional stream data exchange.
+- Stream half-close/write-close event flow.
+- Multiple connections per peer.
 - Identity upgrade event flow and peer index updates.
 
 ## Architecture Boundaries

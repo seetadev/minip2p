@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 
 use minip2p_core::{Multiaddr, PeerId};
 
-use crate::{ConnectionEndpoint, ConnectionId};
+use crate::{ConnectionEndpoint, ConnectionId, StreamId};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransportEvent {
@@ -11,9 +11,26 @@ pub enum TransportEvent {
         id: ConnectionId,
         endpoint: ConnectionEndpoint,
     },
-    Received {
+    StreamOpened {
         id: ConnectionId,
+        stream_id: StreamId,
+    },
+    IncomingStream {
+        id: ConnectionId,
+        stream_id: StreamId,
+    },
+    StreamData {
+        id: ConnectionId,
+        stream_id: StreamId,
         data: Vec<u8>,
+    },
+    StreamRemoteWriteClosed {
+        id: ConnectionId,
+        stream_id: StreamId,
+    },
+    StreamClosed {
+        id: ConnectionId,
+        stream_id: StreamId,
     },
     Closed {
         id: ConnectionId,
