@@ -101,4 +101,18 @@ pub trait Transport {
     /// Must be called regularly. Never blocks -- returns an empty vec when
     /// there is no work to do.
     fn poll(&mut self) -> Result<Vec<TransportEvent>, TransportError>;
+
+    /// Returns the transport multiaddrs this node is currently listening
+    /// on.
+    ///
+    /// The swarm driver snapshots this on each `poll()` tick and uses it
+    /// to auto-populate Identify's `listen_addrs` so remote peers learn
+    /// where they can reach us. Returning an empty vec is valid for
+    /// transports that don't bind (outbound-only) or haven't bound yet.
+    ///
+    /// Default implementation returns empty; adapters that know their
+    /// bound addresses should override.
+    fn local_addresses(&self) -> Vec<Multiaddr> {
+        Vec::new()
+    }
 }

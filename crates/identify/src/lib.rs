@@ -36,6 +36,12 @@ const MAX_MESSAGE_SIZE: usize = 8192;
 // ---------------------------------------------------------------------------
 
 /// Configuration for the identify protocol.
+///
+/// Note: `listen_addrs` is **not** a field here -- the swarm driver
+/// auto-populates it from the underlying transport's `local_addresses()`
+/// at send time, so the advertised set always reflects what the peer
+/// is actually listening on. See
+/// [`IdentifyProtocol::register_outbound_stream`].
 #[derive(Clone, Debug)]
 pub struct IdentifyConfig {
     /// Protocol version string (e.g. `"ipfs/0.1.0"`).
@@ -44,8 +50,6 @@ pub struct IdentifyConfig {
     pub agent_version: String,
     /// Protocols this node supports (e.g. `["/ipfs/ping/1.0.0"]`).
     pub protocols: Vec<String>,
-    /// Addresses this node is listening on (multiaddr-encoded bytes).
-    pub listen_addrs: Vec<Vec<u8>>,
     /// The local node's public key (protobuf-encoded).
     pub public_key: Vec<u8>,
 }
@@ -145,7 +149,9 @@ impl IdentifyProtocol {
     /// inbound stream. `observed_addr` is the transport address we observed
     /// the remote dialing us from; pass `None` if the information is not
     /// available (the resulting identify message simply omits the
-    /// `observedAddr` field).
+    /// `observedAddr` field). `listen_addrs` is our current listening
+    /// set, typically snapshotted from the transport by the swarm
+    /// driver so it stays in sync with what we're actually bound to.
     ///
     /// The returned actions send our identify message and close the write
     /// side.
@@ -154,6 +160,7 @@ impl IdentifyProtocol {
         peer_id: PeerId,
         stream_id: StreamId,
         observed_addr: Option<Multiaddr>,
+        listen_addrs: &[Multiaddr],
     ) -> Result<Vec<IdentifyAction>, IdentifyError> {
         let state = self.peers.entry(peer_id.clone()).or_default();
 
@@ -166,19 +173,12 @@ impl IdentifyProtocol {
         state.outbound_stream = Some(stream_id);
 
         // libp2p's Identify spec prescribes multicodec-based binary
-        // encoding for observed_addr (see
+        // encoding for observed_addr and listen_addrs (see
         // <https://github.com/multiformats/multiaddr>). `to_bytes()`
         // produces the on-wire shape foreign libp2p peers expect.
         let observed_addr_bytes = observed_addr.map(|addr| addr.to_bytes());
-
-        let msg = IdentifyMessage {
-            protocol_version: Some(self.config.protocol_version.clone()),
-            agent_version: Some(self.config.agent_version.clone()),
-            public_key: Some(self.config.public_key.clone()),
-            listen_addrs: self.config.listen_addrs.clone(),
-            observed_addr: observed_addr_bytes,
-            protocols: self.config.protocols.clone(),
-        };
+        let listen_addrs_bytes: Vec<Vec<u8>> =
+            listen_addrs.iter().map(|addr| addr.to_bytes()).collect();
 
         // libp2p Identify is wire-framed as a varint length prefix
         // followed by the protobuf body (see
@@ -187,6 +187,15 @@ impl IdentifyProtocol {
         // first bytes of the protobuf body as a length varint -- which
         // commonly lands on wire type 4 and is rejected as
         // "deprecated group".
+        let msg = IdentifyMessage {
+            protocol_version: Some(self.config.protocol_version.clone()),
+            agent_version: Some(self.config.agent_version.clone()),
+            public_key: Some(self.config.public_key.clone()),
+            listen_addrs: listen_addrs_bytes,
+            observed_addr: observed_addr_bytes,
+            protocols: self.config.protocols.clone(),
+        };
+
         let encoded = msg.encode();
         let data = encode_length_prefixed(&encoded);
 
@@ -400,7 +409,6 @@ mod tests {
             protocol_version: "minip2p/test".into(),
             agent_version: "minip2p-test/0.0.1".into(),
             protocols: vec!["/ipfs/ping/1.0.0".into()],
-            listen_addrs: Vec::new(),
             public_key: vec![1, 2, 3, 4],
         }
     }
@@ -443,8 +451,12 @@ mod tests {
         let peer = sample_peer();
         let stream = StreamId::new(1);
 
+        let listen_addrs = [
+            <Multiaddr as core::str::FromStr>::from_str("/ip4/127.0.0.1/udp/4001/quic-v1")
+                .unwrap(),
+        ];
         let actions = identify
-            .register_outbound_stream(peer.clone(), stream, None)
+            .register_outbound_stream(peer.clone(), stream, None, &listen_addrs)
             .unwrap();
 
         let data = actions
@@ -461,6 +473,13 @@ mod tests {
         let msg = IdentifyMessage::decode(body).expect("body decodes");
         assert_eq!(msg.agent_version.as_deref(), Some("minip2p-test/0.0.1"));
         assert_eq!(msg.protocol_version.as_deref(), Some("minip2p/test"));
+
+        // listen_addrs are encoded as binary multicodec bytes, one per
+        // multiaddr passed in -- the regression we're guarding against.
+        assert_eq!(msg.listen_addrs.len(), 1);
+        let decoded =
+            Multiaddr::from_bytes(&msg.listen_addrs[0]).expect("listen_addr round-trips");
+        assert_eq!(decoded, listen_addrs[0]);
     }
 
     #[test]
@@ -475,7 +494,6 @@ mod tests {
             protocol_version: "other".into(),
             agent_version: "other".into(),
             protocols: Vec::new(),
-            listen_addrs: Vec::new(),
             public_key: Vec::new(),
         });
         let r_peer = sample_peer();
@@ -484,7 +502,7 @@ mod tests {
 
         // Responder emits the framed bytes.
         let actions = responder
-            .register_outbound_stream(i_peer.clone(), stream, None)
+            .register_outbound_stream(i_peer.clone(), stream, None, &[])
             .unwrap();
         let mut framed = Vec::new();
         for action in actions {

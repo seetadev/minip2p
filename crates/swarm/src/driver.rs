@@ -222,6 +222,12 @@ impl<T: Transport> Swarm<T> {
     pub fn poll(&mut self) -> Result<Vec<SwarmEvent>, TransportError> {
         let now_ms = self.now_ms();
 
+        // 0. Refresh the core's snapshot of our listening addresses so
+        //    Identify advertises the current bound set. Cheap -- a
+        //    handful of multiaddrs at most.
+        self.core
+            .set_local_addresses(self.transport.local_addresses());
+
         // 1. Feed transport events to the core.
         let events = self.transport.poll()?;
         for event in events {

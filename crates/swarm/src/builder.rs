@@ -27,11 +27,15 @@ const DEFAULT_AGENT_VERSION: &str = "minip2p/0.1.0";
 ///
 /// Use the setter methods to override. Call [`SwarmBuilder::build`] to
 /// construct the swarm over a caller-provided transport.
+///
+/// Note: Identify's `listen_addrs` is **not** set via the builder --
+/// the swarm snapshots it from the transport's `local_addresses()` on
+/// every `poll()` tick, so the advertised set always reflects what
+/// the peer is actually bound to.
 pub struct SwarmBuilder {
     protocol_version: String,
     agent_version: String,
     protocols: Vec<String>,
-    listen_addrs: Vec<Vec<u8>>,
     public_key: Vec<u8>,
     /// Derived once from the keypair and cached so [`Swarm::local_peer_id`]
     /// is infallible.
@@ -53,7 +57,6 @@ impl SwarmBuilder {
                 IDENTIFY_PROTOCOL_ID.to_string(),
                 PING_PROTOCOL_ID.to_string(),
             ],
-            listen_addrs: Vec::new(),
             public_key: keypair.public_key().encode_protobuf(),
             local_peer_id: keypair.peer_id(),
             ping_config: PingConfig::default(),
@@ -88,12 +91,6 @@ impl SwarmBuilder {
         self
     }
 
-    /// Adds a listen address (multiaddr, binary encoding) advertised to peers.
-    pub fn listen_addr_bytes(mut self, addr: Vec<u8>) -> Self {
-        self.listen_addrs.push(addr);
-        self
-    }
-
     /// Overrides the ping configuration (timeout, etc.).
     pub fn ping_config(mut self, config: PingConfig) -> Self {
         self.ping_config = config;
@@ -107,7 +104,6 @@ impl SwarmBuilder {
             protocol_version: self.protocol_version,
             agent_version: self.agent_version,
             protocols: self.protocols,
-            listen_addrs: self.listen_addrs,
             public_key: self.public_key,
         };
         Swarm::new(transport, identify, self.ping_config, self.local_peer_id)
@@ -122,7 +118,6 @@ impl SwarmBuilder {
             protocol_version: self.protocol_version,
             agent_version: self.agent_version,
             protocols: self.protocols,
-            listen_addrs: self.listen_addrs,
             public_key: self.public_key,
         }
     }
