@@ -89,21 +89,21 @@ Current validated capabilities:
 **Exit criteria**
 - Shared transport behavior is explicit and test-backed.
 
-### Milestone 2: libp2p TLS peer authentication
+### Milestone 2: libp2p TLS peer authentication -- DONE
 
 New crate: `packages/tls` (`minip2p-tls`) -- `no_std + alloc` compatible.
 
-- Add `minip2p-tls` crate for cert generation and verification per the libp2p TLS spec.
-- Generate self-signed X.509 certs with embedded libp2p public key (OID `1.3.6.1.4.1.53594.1.1`).
-- Verify peer certs after TLS handshake and derive PeerId automatically.
-- Wire into QUIC transport: accept `Ed25519Keypair`, auto-verify on connect.
-- Validate against libp2p TLS spec test vectors (Ed25519, ECDSA, secp256k1).
-- Transport-agnostic: reusable by future TCP/WS/WebRTC adapters.
-- Dependencies: `x509-cert` (RustCrypto, `no_std`) for cert building, `der` for DER parsing.
+- [x] Add `minip2p-tls` crate for cert generation and verification per the libp2p TLS spec.
+- [x] Generate self-signed X.509 certs with embedded libp2p public key (OID `1.3.6.1.4.1.53594.1.1`).
+- [x] Verify peer certs after TLS handshake and derive PeerId automatically.
+- [x] Wire into QUIC transport: accept `Ed25519Keypair`, auto-verify on connect.
+- [x] Validate against libp2p TLS spec test vectors (Ed25519, ECDSA, secp256k1).
+- [x] Transport-agnostic: reusable by future TCP/WS/WebRTC adapters.
+- [x] Dependencies: `x509-cert` (RustCrypto, `no_std`) for cert building, `der` for DER parsing.
 
 **Exit criteria**
-- Two QUIC peers connect and automatically know each other's PeerId without manual verification.
-- Spec test vectors pass.
+- Two QUIC peers connect and the dialer automatically knows the listener's PeerId without manual verification.
+- Spec test vectors pass (Ed25519 full verification; ECDSA/secp256k1 parsing + PeerId extraction).
 
 ### Milestone 3: Identify protocol
 

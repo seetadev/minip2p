@@ -4,72 +4,24 @@
 //! They run against the QUIC adapter but should pass for any conforming
 //! transport implementation.
 
-use std::io::Write;
-
-use minip2p_core::{Multiaddr, PeerAddr, Protocol};
-use minip2p_identity::PeerId;
+use minip2p_core::PeerAddr;
 use minip2p_quic::{QuicNodeConfig, QuicTransport};
 use minip2p_transport::{ConnectionId, Transport, TransportError, TransportEvent};
-use std::str::FromStr;
-use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
 // Helpers (shared with two_peer.rs; duplicated to keep test files independent)
 // ---------------------------------------------------------------------------
 
-fn generate_cert_pair() -> (TempDir, String, String) {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mut params = rcgen::CertificateParams::new(Vec::new()).expect("params");
-    params
-        .distinguished_name
-        .push(rcgen::DnType::CommonName, "minip2p-test");
-    let key_pair = rcgen::KeyPair::generate().expect("keypair");
-    let cert = params.self_signed(&key_pair).expect("cert");
+fn setup_pair() -> (QuicTransport, QuicTransport, PeerAddr) {
+    let mut server =
+        QuicTransport::new(QuicNodeConfig::dev_listener(), "127.0.0.1:0").expect("server");
+    let client =
+        QuicTransport::new(QuicNodeConfig::dev_dialer(), "127.0.0.1:0").expect("client");
 
-    let cert_path = dir.path().join("cert.pem");
-    let key_path = dir.path().join("key.pem");
-    std::fs::File::create(&cert_path)
-        .expect("create cert")
-        .write_all(cert.pem().as_bytes())
-        .expect("write cert");
-    std::fs::File::create(&key_path)
-        .expect("create key")
-        .write_all(key_pair.serialize_pem().as_bytes())
-        .expect("write key");
+    server.listen_on_bound_addr().expect("listen");
+    let peer_addr = server.local_peer_addr().expect("peer addr");
 
-    (
-        dir,
-        cert_path.to_str().unwrap().to_string(),
-        key_path.to_str().unwrap().to_string(),
-    )
-}
-
-fn make_listen_multiaddr(port: u16) -> Multiaddr {
-    Multiaddr::from_protocols(vec![
-        Protocol::Ip4([127, 0, 0, 1]),
-        Protocol::Udp(port),
-        Protocol::QuicV1,
-    ])
-}
-
-fn test_peer_id() -> PeerId {
-    PeerId::from_str("QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N").expect("peer id")
-}
-
-fn setup_pair() -> (QuicTransport, QuicTransport, PeerAddr, TempDir) {
-    let (cert_dir, cert_path, key_path) = generate_cert_pair();
-    let server_cfg = QuicNodeConfig::dev_listener_with_tls(&cert_path, &key_path);
-    let client_cfg = QuicNodeConfig::dev_dialer();
-
-    let mut server = QuicTransport::new(server_cfg, "127.0.0.1:0").expect("server");
-    let client = QuicTransport::new(client_cfg, "127.0.0.1:0").expect("client");
-
-    let port = server.local_addr().expect("addr").port();
-    let listen_ma = make_listen_multiaddr(port);
-    server.listen(&listen_ma).expect("listen");
-
-    let peer_addr = PeerAddr::new(listen_ma, test_peer_id()).expect("peer addr");
-    (server, client, peer_addr, cert_dir)
+    (server, client, peer_addr)
 }
 
 fn drive_pair_once(
@@ -143,7 +95,7 @@ fn connect_pair(
 
 #[test]
 fn connected_is_emitted_exactly_once_after_dial() {
-    let (mut server, mut client, peer_addr, _dir) = setup_pair();
+    let (mut server, mut client, peer_addr) = setup_pair();
     let (_, _, _, client_events) = connect_pair(&mut server, &mut client, &peer_addr);
 
     let connected_count = client_events
@@ -155,7 +107,7 @@ fn connected_is_emitted_exactly_once_after_dial() {
 
 #[test]
 fn incoming_connection_precedes_connected_on_server() {
-    let (mut server, mut client, peer_addr, _dir) = setup_pair();
+    let (mut server, mut client, peer_addr) = setup_pair();
     let (server_conn, _, server_events, _) = connect_pair(&mut server, &mut client, &peer_addr);
 
     let incoming_idx = server_events
@@ -178,7 +130,7 @@ fn incoming_connection_precedes_connected_on_server() {
 
 #[test]
 fn no_stream_events_before_connected() {
-    let (mut server, mut client, peer_addr, _dir) = setup_pair();
+    let (mut server, mut client, peer_addr) = setup_pair();
     let (_, _, _, client_events) = connect_pair(&mut server, &mut client, &peer_addr);
 
     let connected_idx = client_events
@@ -203,7 +155,7 @@ fn no_stream_events_before_connected() {
 
 #[test]
 fn dial_with_duplicate_id_returns_connection_exists() {
-    let (mut server, mut client, peer_addr, _dir) = setup_pair();
+    let (mut server, mut client, peer_addr) = setup_pair();
     let id = ConnectionId::new(42);
     client.dial(id, &peer_addr).expect("first dial");
 
@@ -221,7 +173,7 @@ fn dial_with_duplicate_id_returns_connection_exists() {
 
 #[test]
 fn close_rejects_further_stream_operations() {
-    let (mut server, mut client, peer_addr, _dir) = setup_pair();
+    let (mut server, mut client, peer_addr) = setup_pair();
     let (_, client_conn, _, _) = connect_pair(&mut server, &mut client, &peer_addr);
 
     // Open a stream first so we can test send after close.
@@ -247,20 +199,16 @@ fn close_rejects_further_stream_operations() {
 
 #[test]
 fn open_stream_emits_stream_opened() {
-    let (mut server, mut client, peer_addr, _dir) = setup_pair();
+    let (mut server, mut client, peer_addr) = setup_pair();
     let (_, client_conn, _, _) = connect_pair(&mut server, &mut client, &peer_addr);
 
     let stream_id = client.open_stream(client_conn).expect("open stream");
 
-    // StreamOpened should appear in the next poll.
     let (_, ce) = drive_pair_once(&mut server, &mut client);
-    // It may also be in the pending_events from open_stream itself, so check both.
     let found = ce
         .iter()
         .any(|e| matches!(e, TransportEvent::StreamOpened { id, stream_id: sid } if *id == client_conn && *sid == stream_id));
 
-    // If not in poll, check the open_stream already queued it (it does).
-    // Either way the contract is: StreamOpened is emitted.
     assert!(
         found
             || client
@@ -274,7 +222,7 @@ fn open_stream_emits_stream_opened() {
 
 #[test]
 fn incoming_stream_precedes_stream_data() {
-    let (mut server, mut client, peer_addr, _dir) = setup_pair();
+    let (mut server, mut client, peer_addr) = setup_pair();
     let (server_conn, client_conn, _, _) = connect_pair(&mut server, &mut client, &peer_addr);
 
     let stream_id = client.open_stream(client_conn).expect("open stream");
@@ -282,7 +230,6 @@ fn incoming_stream_precedes_stream_data() {
         .send_stream(client_conn, stream_id, b"hello".to_vec())
         .expect("send");
 
-    // Drive until server sees data.
     let mut server_events = Vec::new();
     for _ in 0..50 {
         let (se, _) = drive_pair_once(&mut server, &mut client);
@@ -312,7 +259,7 @@ fn incoming_stream_precedes_stream_data() {
 
 #[test]
 fn close_stream_write_produces_remote_write_closed() {
-    let (mut server, mut client, peer_addr, _dir) = setup_pair();
+    let (mut server, mut client, peer_addr) = setup_pair();
     let (server_conn, client_conn, _, _) = connect_pair(&mut server, &mut client, &peer_addr);
 
     let stream_id = client.open_stream(client_conn).expect("open stream");
@@ -341,17 +288,15 @@ fn close_stream_write_produces_remote_write_closed() {
 
 #[test]
 fn reset_stream_emits_stream_closed() {
-    let (mut server, mut client, peer_addr, _dir) = setup_pair();
+    let (mut server, mut client, peer_addr) = setup_pair();
     let (_, client_conn, _, _) = connect_pair(&mut server, &mut client, &peer_addr);
 
     let stream_id = client.open_stream(client_conn).expect("open stream");
 
-    // Send data so quiche registers the stream internally.
     client
         .send_stream(client_conn, stream_id, b"hello".to_vec())
         .expect("send");
 
-    // Drive so the stream is fully established on the wire.
     for _ in 0..10 {
         drive_pair_once(&mut server, &mut client);
     }
@@ -360,7 +305,6 @@ fn reset_stream_emits_stream_closed() {
         .reset_stream(client_conn, stream_id)
         .expect("reset");
 
-    // StreamClosed should appear in pending events or next poll.
     let mut saw_closed = false;
     let events = client.poll().unwrap();
     if events.iter().any(|e| {
@@ -389,9 +333,8 @@ fn reset_stream_emits_stream_closed() {
 
 #[test]
 fn open_stream_on_unknown_connection_returns_not_found() {
-    let (_dir, cert, key) = generate_cert_pair();
-    let cfg = QuicNodeConfig::dev_listener_with_tls(&cert, &key);
-    let mut transport = QuicTransport::new(cfg, "127.0.0.1:0").expect("bind");
+    let mut transport =
+        QuicTransport::new(QuicNodeConfig::dev_listener(), "127.0.0.1:0").expect("bind");
 
     let err = transport
         .open_stream(ConnectionId::new(999))
@@ -401,9 +344,8 @@ fn open_stream_on_unknown_connection_returns_not_found() {
 
 #[test]
 fn send_on_unknown_connection_returns_not_found() {
-    let (_dir, cert, key) = generate_cert_pair();
-    let cfg = QuicNodeConfig::dev_listener_with_tls(&cert, &key);
-    let mut transport = QuicTransport::new(cfg, "127.0.0.1:0").expect("bind");
+    let mut transport =
+        QuicTransport::new(QuicNodeConfig::dev_listener(), "127.0.0.1:0").expect("bind");
 
     let err = transport
         .send_stream(ConnectionId::new(999), 0.into(), b"data".to_vec())
@@ -413,9 +355,8 @@ fn send_on_unknown_connection_returns_not_found() {
 
 #[test]
 fn poll_returns_empty_when_idle() {
-    let (_dir, cert, key) = generate_cert_pair();
-    let cfg = QuicNodeConfig::dev_listener_with_tls(&cert, &key);
-    let mut transport = QuicTransport::new(cfg, "127.0.0.1:0").expect("bind");
+    let mut transport =
+        QuicTransport::new(QuicNodeConfig::dev_listener(), "127.0.0.1:0").expect("bind");
 
     let events = transport.poll().expect("poll");
     assert!(events.is_empty(), "idle poll must return empty vec");

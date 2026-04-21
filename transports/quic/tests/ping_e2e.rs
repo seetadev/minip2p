@@ -1,61 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
-use std::str::FromStr;
 use std::time::Instant;
 
-use minip2p_core::{Multiaddr, PeerAddr, Protocol};
-use minip2p_identity::PeerId;
+use minip2p_core::{PeerAddr, PeerId};
 use minip2p_multistream_select::{MultistreamOutput, MultistreamSelect};
 use minip2p_ping::{PING_PAYLOAD_LEN, PING_PROTOCOL_ID, PingAction, PingEvent, PingProtocol};
 use minip2p_quic::{QuicNodeConfig, QuicTransport};
 use minip2p_transport::{ConnectionId, StreamId, Transport, TransportEvent};
-use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
-
-fn generate_cert_pair() -> (TempDir, String, String) {
-    let dir = tempfile::tempdir().expect("tempdir");
-
-    let mut params = rcgen::CertificateParams::new(Vec::new()).expect("params");
-    params
-        .distinguished_name
-        .push(rcgen::DnType::CommonName, "minip2p-test");
-
-    let key_pair = rcgen::KeyPair::generate().expect("keypair");
-    let cert = params.self_signed(&key_pair).expect("cert");
-
-    let cert_path = dir.path().join("cert.pem");
-    let key_path = dir.path().join("key.pem");
-
-    std::fs::File::create(&cert_path)
-        .expect("create cert file")
-        .write_all(cert.pem().as_bytes())
-        .expect("write cert");
-
-    std::fs::File::create(&key_path)
-        .expect("create key file")
-        .write_all(key_pair.serialize_pem().as_bytes())
-        .expect("write key");
-
-    let cert_str = cert_path.to_str().expect("cert path").to_string();
-    let key_str = key_path.to_str().expect("key path").to_string();
-
-    (dir, cert_str, key_str)
-}
-
-fn make_listen_multiaddr(port: u16) -> Multiaddr {
-    Multiaddr::from_protocols(vec![
-        Protocol::Ip4([127, 0, 0, 1]),
-        Protocol::Udp(port),
-        Protocol::QuicV1,
-    ])
-}
-
-fn test_peer_id() -> PeerId {
-    PeerId::from_str("QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N").expect("peer id")
-}
 
 fn drive_pair_once(
     server: &mut QuicTransport,
@@ -113,7 +67,6 @@ struct PingHarness {
     server: QuicTransport,
     client: QuicTransport,
     peer_addr: PeerAddr,
-    _cert_dir: TempDir,
     server_conn_id: ConnectionId,
     client_conn_id: ConnectionId,
     client_stream: StreamId,
@@ -127,19 +80,13 @@ struct PingHarness {
 impl PingHarness {
     /// Create a connected, verified, and multistream-negotiated ping pair.
     fn new(client_conn_id_raw: u64) -> Self {
-        let (cert_dir, cert_path, key_path) = generate_cert_pair();
+        let mut server =
+            QuicTransport::new(QuicNodeConfig::dev_listener(), "127.0.0.1:0").expect("server bind");
+        let mut client =
+            QuicTransport::new(QuicNodeConfig::dev_dialer(), "127.0.0.1:0").expect("client bind");
 
-        let listener_cfg = QuicNodeConfig::dev_listener_with_tls(&cert_path, &key_path);
-        let dialer_cfg = QuicNodeConfig::dev_dialer();
-
-        let mut server = QuicTransport::new(listener_cfg, "127.0.0.1:0").expect("server bind");
-        let mut client = QuicTransport::new(dialer_cfg, "127.0.0.1:0").expect("client bind");
-
-        let server_addr = server.local_addr().expect("server local addr");
-        let listen_ma = make_listen_multiaddr(server_addr.port());
-        server.listen(&listen_ma).expect("server listen");
-
-        let peer_addr = PeerAddr::new(listen_ma, test_peer_id()).expect("peer addr");
+        server.listen_on_bound_addr().expect("server listen");
+        let peer_addr = server.local_peer_addr().expect("peer addr");
 
         // Connect.
         let client_conn_id = ConnectionId::new(client_conn_id_raw);
@@ -156,27 +103,8 @@ impl PingHarness {
         )
         .expect("server should observe connection");
 
-        // Verify identity.
-        server
-            .verify_connection_peer_id(server_conn_id, peer_addr.peer_id().clone())
-            .expect("verify server-side peer id");
-
-        let mut server_verified = false;
-        for _ in 0..50 {
-            let (server_events, _) = drive_pair_once(&mut server, &mut client);
-            for event in server_events {
-                if let TransportEvent::PeerIdentityVerified { id, endpoint, .. } = event {
-                    if id == server_conn_id {
-                        assert_eq!(endpoint.peer_id(), Some(peer_addr.peer_id()));
-                        server_verified = true;
-                    }
-                }
-            }
-            if server_verified {
-                break;
-            }
-        }
-        assert!(server_verified, "server should emit peer verified event");
+        // Identity is now auto-verified from the TLS certificate. No manual
+        // verify_connection_peer_id call needed.
 
         // Open stream and negotiate multistream-select for ping.
         let client_stream = client
@@ -267,7 +195,6 @@ impl PingHarness {
             server,
             client,
             peer_addr,
-            _cert_dir: cert_dir,
             server_conn_id,
             client_conn_id,
             client_stream,

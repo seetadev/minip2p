@@ -201,11 +201,16 @@ pub struct QuicTransport {
     next_connection_id: u64,
     /// Retained node configuration.
     node_config: QuicNodeConfig,
+    /// Temp files for the auto-generated TLS cert/key. Held here to keep them
+    /// alive for the lifetime of the transport (quiche reads from file paths).
+    _tls_temp_files: Option<(tempfile::NamedTempFile, tempfile::NamedTempFile)>,
 }
 
 impl QuicTransport {
     /// Creates a new QUIC transport bound to the given address.
     pub fn new(node_config: QuicNodeConfig, bind_addr: &str) -> Result<Self, TransportError> {
+        use std::io::Write;
+
         let socket = UdpSocket::bind(bind_addr).map_err(|e| TransportError::ListenFailed {
             reason: format!("failed to bind udp socket: {e}"),
         })?;
@@ -234,23 +239,70 @@ impl QuicTransport {
         quiche_config.set_initial_max_streams_bidi(100);
         quiche_config.set_max_recv_udp_payload_size(1350);
         quiche_config.set_max_send_udp_payload_size(1350);
-        quiche_config.verify_peer(node_config.peer_verification());
+        quiche_config.verify_peer(false);
 
-        if let Some(cert_path) = node_config.local_cert_chain_path() {
+        // Auto-generate libp2p TLS cert from Ed25519 keypair.
+        //
+        // NOTE: quiche only supports loading certs/keys from PEM file paths
+        // (no in-memory API in the default build). We write to temp files as a
+        // workaround. The files are auto-deleted when the transport is dropped.
+        // To avoid this, quiche would need the `boringssl-boring-crate` feature
+        // for in-memory cert loading via `SslContextBuilder`.
+        let tls_temp_files = if let Some(keypair) = node_config.keypair() {
+            let (cert_der, key_der) =
+                minip2p_tls::generate_certificate(keypair).map_err(|e| {
+                    TransportError::InvalidConfig {
+                        reason: format!("failed to generate libp2p TLS certificate: {e}"),
+                    }
+                })?;
+
+            let cert_pem = minip2p_tls::cert_to_pem(&cert_der);
+            let key_pem = minip2p_tls::private_key_to_pem(&key_der);
+
+            let mut cert_file = tempfile::NamedTempFile::new().map_err(|e| {
+                TransportError::InvalidConfig {
+                    reason: format!("failed to create temp cert file: {e}"),
+                }
+            })?;
+            cert_file.write_all(cert_pem.as_bytes()).map_err(|e| {
+                TransportError::InvalidConfig {
+                    reason: format!("failed to write temp cert file: {e}"),
+                }
+            })?;
+
+            let mut key_file = tempfile::NamedTempFile::new().map_err(|e| {
+                TransportError::InvalidConfig {
+                    reason: format!("failed to create temp key file: {e}"),
+                }
+            })?;
+            key_file.write_all(key_pem.as_bytes()).map_err(|e| {
+                TransportError::InvalidConfig {
+                    reason: format!("failed to write temp key file: {e}"),
+                }
+            })?;
+
+            let cert_path = cert_file.path().to_str().ok_or(TransportError::InvalidConfig {
+                reason: "temp cert file path is not valid UTF-8".into(),
+            })?;
             quiche_config
                 .load_cert_chain_from_pem_file(cert_path)
-                .map_err(|e| TransportError::ListenFailed {
-                    reason: format!("failed to load cert chain: {e}"),
+                .map_err(|e| TransportError::InvalidConfig {
+                    reason: format!("failed to load generated cert into quiche: {e}"),
                 })?;
-        }
 
-        if let Some(key_path) = node_config.local_priv_key_path() {
+            let key_path = key_file.path().to_str().ok_or(TransportError::InvalidConfig {
+                reason: "temp key file path is not valid UTF-8".into(),
+            })?;
             quiche_config
                 .load_priv_key_from_pem_file(key_path)
-                .map_err(|e| TransportError::ListenFailed {
-                    reason: format!("failed to load private key: {e}"),
+                .map_err(|e| TransportError::InvalidConfig {
+                    reason: format!("failed to load generated key into quiche: {e}"),
                 })?;
-        }
+
+            Some((cert_file, key_file))
+        } else {
+            None
+        };
 
         Ok(Self {
             socket,
@@ -262,6 +314,7 @@ impl QuicTransport {
             listen_addr: None,
             next_connection_id: 1,
             node_config,
+            _tls_temp_files: tls_temp_files,
         })
     }
 
@@ -272,6 +325,39 @@ impl QuicTransport {
             .map_err(|e| TransportError::PollError {
                 reason: format!("failed to get local addr: {e}"),
             })
+    }
+
+    /// Returns this node's `PeerId`, derived from the configured keypair.
+    ///
+    /// Returns `None` if no keypair was configured.
+    pub fn local_peer_id(&self) -> Option<PeerId> {
+        self.node_config.peer_id()
+    }
+
+    /// Returns a `PeerAddr` that other nodes can use to dial this transport.
+    ///
+    /// Combines the bound socket address with this node's `PeerId`. Only
+    /// available after the transport has a keypair configured.
+    pub fn local_peer_addr(&self) -> Result<PeerAddr, TransportError> {
+        let addr = self.local_addr()?;
+        let peer_id = self.local_peer_id().ok_or(TransportError::InvalidConfig {
+            reason: "no keypair configured; cannot derive local PeerAddr".into(),
+        })?;
+        let multiaddr = socket_addr_to_multiaddr(addr);
+        PeerAddr::new(multiaddr, peer_id).map_err(|e| TransportError::InvalidConfig {
+            reason: format!("failed to build local PeerAddr: {e}"),
+        })
+    }
+
+    /// Starts listening on the already-bound socket address.
+    ///
+    /// Convenience wrapper around [`listen`](Transport::listen) that uses the
+    /// address the UDP socket is bound to, avoiding manual `Multiaddr`
+    /// construction.
+    pub fn listen_on_bound_addr(&mut self) -> Result<(), TransportError> {
+        let addr = self.local_addr()?;
+        let multiaddr = socket_addr_to_multiaddr(addr);
+        self.listen(&multiaddr)
     }
 
     /// Dials a peer, automatically allocating a connection id.
@@ -456,7 +542,7 @@ impl Transport for QuicTransport {
 
         if !self.node_config.can_listen() {
             return Err(TransportError::InvalidConfig {
-                reason: "listener role requires local TLS files; call QuicNodeConfig::with_local_tls_files(...) or QuicNodeConfig::dev_listener_with_tls(...)".into(),
+                reason: "listener role requires an Ed25519 keypair; use QuicNodeConfig::with_keypair(...) or QuicNodeConfig::dev_listener()".into(),
             });
         }
 
