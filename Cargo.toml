@@ -7,9 +7,9 @@ members = [
     "crates/identity",
     "crates/multistream-select",
     "crates/ping",
-    "crates/quic",
     "crates/relay",
     "crates/swarm",
     "crates/tls",
     "crates/transport",
+    "transports/quic",
 ]

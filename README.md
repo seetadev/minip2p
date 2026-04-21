@@ -26,7 +26,7 @@ Sans-I/O core crates (`no_std + alloc`):
 
 Runtime adapters (`std`):
 
-- `crates/quic` (`minip2p-quic`): QUIC transport adapter built on `quiche`, with libp2p TLS baked in.
+- `transports/quic` (`minip2p-quic`): QUIC transport adapter built on `quiche`, with libp2p TLS baked in.
 - `crates/swarm` (also ships a thin `std` driver `Swarm<T: Transport>` behind the `std` feature).
 
 Current validated behavior:

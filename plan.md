@@ -24,7 +24,7 @@ Implemented crates:
 - `crates/transport` (`minip2p-transport`)
 - `crates/tls` (`minip2p-tls`)
 - `crates/swarm` (`minip2p-swarm`) -- see "Runtime adapters" below
-- `crates/quic` (`minip2p-quic`)
+- `transports/quic` (`minip2p-quic`)
 
 Current validated capabilities:
 
@@ -60,14 +60,14 @@ Callers pump events and bytes in; the crate emits actions/events out.
 Concrete I/O, real clocks, async-friendly orchestration. Consumed by
 applications.
 
-- `crates/quic`: QUIC implementation over a non-blocking UDP socket.
+- `transports/quic`: QUIC implementation over a non-blocking UDP socket.
 - `crates/swarm` (driver only): thin `std` wrapper around `SwarmCore`
   that owns a concrete `Transport`, reads the wall clock, and preserves
   the one-call DX (`swarm.dial`, `swarm.ping`, `swarm.open_user_stream`).
   The actual orchestration logic lives in `crates/swarm`'s Sans-I/O
   core (see above).
-- Future `crates/tcp`, `crates/ws`, `crates/webrtc` transport adapters
-  follow the same pattern.
+- Future `transports/tcp`, `transports/ws`, `transports/webrtc`
+  adapters follow the same pattern.
 
 ### Ownership rules
 
@@ -201,7 +201,7 @@ New crate: `crates/tls` (`minip2p-tls`) -- `no_std + alloc` compatible.
 - Keep **Sans-I/O** as architecture baseline.
 - Keep **`no_std + alloc`** support for shared/core crates.
 - Keep **QUIC-first** while designing for **multi-transport** expansion.
-- Keep `crates/quic` as a **single crate** with internal layering for logic and runtime ergonomics.
+- Keep `transports/quic` as a **single crate** with internal layering for logic and runtime ergonomics.
 - Optimize for **DX** without compromising explicit architecture boundaries.
 - Varint helpers live in `minip2p-identity` (public) and are re-exported through `minip2p-core` to avoid circular deps.
 - `multistream-select` depends on `minip2p-core` for shared varint code rather than duplicating it.
