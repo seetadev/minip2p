@@ -5,46 +5,59 @@ use minip2p_identity::PeerId;
 
 use crate::{MultiaddrError, Protocol};
 
+/// An ordered sequence of protocol components representing a network address.
+///
+/// Parse from a string with [`FromStr`] or build programmatically with
+/// [`from_protocols`](Multiaddr::from_protocols).
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Multiaddr {
     protocols: Vec<Protocol>,
 }
 
 impl Multiaddr {
+    /// Creates an empty multiaddr.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Creates a multiaddr from a pre-built protocol list.
     pub fn from_protocols(protocols: Vec<Protocol>) -> Self {
         Self { protocols }
     }
 
+    /// Returns the protocol components as a slice.
     pub fn protocols(&self) -> &[Protocol] {
         &self.protocols
     }
 
+    /// Returns an iterator over the protocol components.
     pub fn iter(&self) -> core::slice::Iter<'_, Protocol> {
         self.protocols.iter()
     }
 
+    /// Appends a protocol component.
     pub fn push(&mut self, protocol: Protocol) {
         self.protocols.push(protocol);
     }
 
+    /// Returns the number of protocol components.
     pub fn len(&self) -> usize {
         self.protocols.len()
     }
 
+    /// Returns `true` if this multiaddr has no components.
     pub fn is_empty(&self) -> bool {
         self.protocols.is_empty()
     }
 
+    /// Returns `true` if any component is `/quic-v1`.
     pub fn has_quic_v1(&self) -> bool {
         self.protocols
             .iter()
             .any(|protocol| matches!(protocol, Protocol::QuicV1))
     }
 
+    /// Returns the first `/p2p` peer id, if present.
     pub fn peer_id(&self) -> Option<&PeerId> {
         self.protocols.iter().find_map(|protocol| match protocol {
             Protocol::P2p(peer_id) => Some(peer_id),
@@ -52,6 +65,7 @@ impl Multiaddr {
         })
     }
 
+    /// Returns a new multiaddr with `other` appended.
     pub fn encapsulate(&self, other: &Self) -> Self {
         let mut protocols = Vec::with_capacity(self.protocols.len() + other.protocols.len());
         protocols.extend(self.protocols.iter().cloned());
@@ -59,6 +73,7 @@ impl Multiaddr {
         Self { protocols }
     }
 
+    /// Removes the last occurrence of `suffix` and returns the prefix.
     pub fn decapsulate(&self, suffix: &Self) -> Option<Self> {
         if suffix.protocols.is_empty() {
             return Some(self.clone());
@@ -77,6 +92,7 @@ impl Multiaddr {
         None
     }
 
+    /// Returns `true` if this is a valid QUIC transport address (host + udp + quic-v1).
     pub fn is_quic_transport(&self) -> bool {
         is_quic_transport_slice(&self.protocols)
     }
@@ -121,6 +137,7 @@ impl<'a> IntoIterator for &'a Multiaddr {
     }
 }
 
+/// Checks if a protocol slice forms a valid QUIC transport (host + udp + quic-v1).
 pub(crate) fn is_quic_transport_slice(protocols: &[Protocol]) -> bool {
     protocols.len() == 3
         && protocols[0].is_host()
@@ -128,6 +145,7 @@ pub(crate) fn is_quic_transport_slice(protocols: &[Protocol]) -> bool {
         && matches!(protocols[2], Protocol::QuicV1)
 }
 
+/// Parses a `/`-delimited multiaddr string into protocol components.
 fn parse_multiaddr(input: &str) -> Result<Multiaddr, MultiaddrError> {
     if input.is_empty() {
         return Err(MultiaddrError::EmptyInput);
@@ -220,6 +238,7 @@ fn parse_multiaddr(input: &str) -> Result<Multiaddr, MultiaddrError> {
     Ok(Multiaddr::from_protocols(protocols))
 }
 
+/// Returns the next segment as a value for the given protocol, or an error.
 fn require_value<'a>(
     segments: &'a [&str],
     idx: usize,
@@ -233,6 +252,7 @@ fn require_value<'a>(
     }
 }
 
+/// Basic DNS name validation: non-empty, no slashes, no whitespace/control chars.
 fn is_valid_dns(value: &str) -> bool {
     !value.is_empty()
         && !value.contains('/')
@@ -241,6 +261,7 @@ fn is_valid_dns(value: &str) -> bool {
             .any(|ch| ch.is_whitespace() || ch.is_control())
 }
 
+/// Parses a dotted-quad IPv4 string into 4 bytes.
 fn parse_ip4(value: &str) -> Option<[u8; 4]> {
     let mut out = [0u8; 4];
     let mut parts = value.split('.');

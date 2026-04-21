@@ -28,6 +28,12 @@ Current validated capabilities:
 - Stream half-close/write-close event flow.
 - Multiple connections per peer.
 - Identity upgrade event flow and peer index updates.
+- Multistream-select protocol negotiation with spec-compliant varint-length-prefixed framing.
+- Ping protocol: outbound RTT measurement, inbound echo, fragmentation buffering, configurable timeouts.
+- End-to-end protocol stack: QUIC transport + multistream-select + ping in integration tests.
+- Varint helpers (`read_uvarint`, `write_uvarint`, `uvarint_len`) shared via `minip2p-identity` and re-exported through `minip2p-core`.
+- Rustdoc on all public APIs across all 6 crates.
+- Internal comments on all private functions, types, and fields for contributor onboarding.
 
 ## Architecture Boundaries
 
@@ -64,11 +70,14 @@ Current validated capabilities:
 
 ## Roadmap (Outcome-Driven)
 
-### Milestone 0: Docs and boundary alignment
+### Milestone 0: Docs and boundary alignment -- DONE
 
-- Keep root docs aligned with actual workspace crates and capabilities.
-- Document no_std boundaries and adapter responsibilities.
-- Clarify transport-agnostic vs transport-specific validation responsibilities.
+- [x] Keep root docs aligned with actual workspace crates and capabilities.
+- [x] Document no_std boundaries and adapter responsibilities.
+- [x] Clarify transport-agnostic vs transport-specific validation responsibilities.
+- [x] Rustdoc on all public types/methods across all crates.
+- [x] Internal comments on all private functions, types, and fields.
+- [x] READMEs for every crate.
 
 **Exit criteria**
 - New contributors can run tests and explain crate boundaries in under 10 minutes.
@@ -103,7 +112,9 @@ Current validated capabilities:
 ### Milestone 4: Core protocols
 
 - Add Noise XX handshake state machine.
-- Add ping and identify protocols with deterministic events.
+- [x] Add ping protocol with deterministic events and RTT measurement.
+- [x] Add multistream-select with spec-compliant varint framing.
+- Add identify protocol.
 - Start gossipsub baseline after ping/identify stabilization.
 
 **Exit criteria**
@@ -133,3 +144,6 @@ Current validated capabilities:
 - Keep **QUIC-first** while designing for **multi-transport** expansion.
 - Keep `transports/quic` as a **single crate** with internal layering for logic and runtime ergonomics.
 - Optimize for **DX** without compromising explicit architecture boundaries.
+- Varint helpers live in `minip2p-identity` (public) and are re-exported through `minip2p-core` to avoid circular deps.
+- `multistream-select` depends on `minip2p-core` for shared varint code rather than duplicating it.
+- Dropped `segment` index fields from `MultiaddrError`/`PeerAddrError` -- the protocol name and value in the error message are sufficient context.

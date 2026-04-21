@@ -26,6 +26,9 @@ Current validated behavior:
 - Peers open QUIC streams and exchange stream data bidirectionally.
 - Stream half-close (close write) propagates as transport events.
 - Identity upgrade events are emitted and peer indexing updates correctly.
+- Multistream-select negotiation with spec-compliant varint-length-prefixed framing.
+- Ping protocol round-trips with RTT measurement over negotiated streams.
+- End-to-end tests: QUIC transport + multistream-select + ping protocol.
 
 ## Architecture boundaries
 
@@ -46,12 +49,26 @@ Build and run tests:
 cargo test
 ```
 
+## Documentation
+
+Every crate has a README and rustdoc on all public APIs. Internal methods and types are commented for contributor onboarding.
+
+Generate the full API docs with:
+
+```bash
+cargo doc --workspace --no-deps --open
+```
+
 ## Roadmap focus
 
 - [x] Local QUIC connectivity and integration coverage.
+- [x] Multistream-select with spec-compliant varint framing.
+- [x] Ping protocol with RTT measurement and timeout handling.
+- [x] End-to-end protocol stack tests (QUIC + multistream + ping).
+- [x] Rustdoc and internal comments across all crates.
 - [ ] Harden transport contract guarantees for long-term multi-transport support.
 - [ ] Improve QUIC ergonomics and operational diagnostics.
-- [ ] Add core protocols (Noise XX, ping, identify, gossipsub).
+- [ ] Add core protocols (Noise XX, identify, gossipsub).
 - [ ] Introduce additional transport adapters (TCP, WebSocket, WebRTC).
 
 See `plan.md` for the detailed execution plan and milestones.

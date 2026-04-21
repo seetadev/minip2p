@@ -1,13 +1,16 @@
 use core::fmt;
 
+/// Opaque identifier for a stream within a connection.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StreamId(u64);
 
 impl StreamId {
+    /// Creates a stream id from a raw `u64`.
     pub fn new(id: u64) -> Self {
         Self(id)
     }
 
+    /// Returns the underlying `u64` value.
     pub fn as_u64(&self) -> u64 {
         self.0
     }

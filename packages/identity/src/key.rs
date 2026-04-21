@@ -11,12 +11,17 @@ use ed25519_dalek::{Signature, VerifyingKey};
 #[repr(u64)]
 /// Key type values used by libp2p key protobuf wrappers.
 pub enum KeyType {
+    /// RSA key (protobuf field value 0).
     Rsa = 0,
+    /// Ed25519 key (protobuf field value 1).
     Ed25519 = 1,
+    /// Secp256k1 key (protobuf field value 2).
     Secp256k1 = 2,
+    /// ECDSA key (protobuf field value 3).
     Ecdsa = 3,
 }
 
+/// Converts a protobuf key type integer to the corresponding `KeyType` variant.
 impl TryFrom<u64> for KeyType {
     type Error = PublicKeyError;
 
@@ -167,6 +172,7 @@ impl fmt::LowerHex for PublicKey {
     }
 }
 
+/// Errors from decoding a libp2p public key protobuf.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum PublicKeyError {
     #[error("public key protobuf input is empty")]
@@ -186,6 +192,7 @@ pub enum PublicKeyError {
     },
 }
 
+/// Errors from signature verification.
 #[cfg(feature = "ed25519")]
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum VerifyError {

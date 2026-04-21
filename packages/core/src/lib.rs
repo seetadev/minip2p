@@ -1,3 +1,9 @@
+//! Transport-agnostic address primitives for minip2p.
+//!
+//! Provides [`Multiaddr`] parsing/formatting, [`PeerAddr`] for validated
+//! transport + peer id addresses, and the [`Protocol`] enum. `no_std` + `alloc`
+//! compatible.
+
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;

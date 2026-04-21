@@ -1,5 +1,6 @@
 use core::fmt;
 
+/// Lifecycle state of a transport connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectionState {
     Connecting,

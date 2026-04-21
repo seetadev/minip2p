@@ -1,3 +1,9 @@
+//! Peer identity primitives for minip2p.
+//!
+//! Provides Ed25519 key generation, public key protobuf encoding, peer id
+//! derivation and parsing, and signature verification. `no_std` + `alloc`
+//! compatible.
+
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;

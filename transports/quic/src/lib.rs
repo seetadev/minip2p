@@ -1,3 +1,8 @@
+//! Synchronous QUIC transport adapter for minip2p, powered by Cloudflare's `quiche`.
+//!
+//! Implements [`Transport`] with a poll-driven, non-blocking UDP socket.
+//! No async runtime required.
+
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
 
@@ -14,6 +19,7 @@ pub use config::QuicNodeConfig;
 
 use connection::QuicConnection;
 
+/// Parses a QUIC multiaddr into (host protocol, port), validating the /host/udp/port/quic-v1 shape.
 fn extract_quic_host_and_port(
     multiaddr: &Multiaddr,
     context: &'static str,
@@ -47,6 +53,7 @@ fn extract_quic_host_and_port(
     Ok((host.clone(), port))
 }
 
+/// Like `extract_quic_host_and_port` but only accepts IP hosts (rejects DNS -- DNS is dial-only).
 fn extract_listen_socket_addr(
     multiaddr: &Multiaddr,
     context: &'static str,
@@ -73,6 +80,7 @@ fn extract_listen_socket_addr(
     Ok(SocketAddr::new(ip, port))
 }
 
+/// Resolves a QUIC multiaddr to a socket address, performing synchronous DNS resolution for /dns* hosts.
 fn resolve_dial_socket_addr(
     multiaddr: &Multiaddr,
     context: &'static str,
@@ -140,6 +148,7 @@ fn resolve_dial_socket_addr(
     }
 }
 
+/// Validates that the requested listen address matches the already-bound UDP socket.
 fn ensure_listen_matches_bound_socket(
     requested: SocketAddr,
     bound: SocketAddr,
@@ -156,6 +165,7 @@ fn ensure_listen_matches_bound_socket(
     })
 }
 
+/// Converts a socket address to a /ipX/udp/port/quic-v1 multiaddr.
 fn socket_addr_to_multiaddr(addr: SocketAddr) -> Multiaddr {
     match addr {
         SocketAddr::V4(v4) => Multiaddr::from_protocols(vec![
@@ -171,19 +181,30 @@ fn socket_addr_to_multiaddr(addr: SocketAddr) -> Multiaddr {
     }
 }
 
+/// QUIC transport backed by a non-blocking UDP socket and `quiche`.
 pub struct QuicTransport {
+    /// Non-blocking UDP socket for all QUIC traffic.
     socket: UdpSocket,
+    /// Shared quiche configuration for all connections.
     quiche_config: quiche::Config,
+    /// Active connections keyed by connection id.
     connections: HashMap<ConnectionId, QuicConnection>,
+    /// Maps QUIC connection-id bytes to logical connection ids for packet routing.
     cid_to_connection: HashMap<Vec<u8>, ConnectionId>,
+    /// Maps peer ids to their set of connection ids.
     peer_connections: HashMap<PeerId, BTreeSet<ConnectionId>>,
+    /// Events queued between poll() calls.
     pending_events: Vec<TransportEvent>,
+    /// The socket address we're listening on, if any.
     listen_addr: Option<SocketAddr>,
+    /// Auto-incrementing connection id counter.
     next_connection_id: u64,
+    /// Retained node configuration.
     node_config: QuicNodeConfig,
 }
 
 impl QuicTransport {
+    /// Creates a new QUIC transport bound to the given address.
     pub fn new(node_config: QuicNodeConfig, bind_addr: &str) -> Result<Self, TransportError> {
         let socket = UdpSocket::bind(bind_addr).map_err(|e| TransportError::ListenFailed {
             reason: format!("failed to bind udp socket: {e}"),
@@ -244,6 +265,7 @@ impl QuicTransport {
         })
     }
 
+    /// Returns the local socket address this transport is bound to.
     pub fn local_addr(&self) -> Result<SocketAddr, TransportError> {
         self.socket
             .local_addr()
@@ -252,12 +274,14 @@ impl QuicTransport {
             })
     }
 
+    /// Dials a peer, automatically allocating a connection id.
     pub fn dial_auto(&mut self, addr: &PeerAddr) -> Result<ConnectionId, TransportError> {
         let id = self.allocate_connection_id()?;
         self.dial(id, addr)?;
         Ok(id)
     }
 
+    /// Returns all active connection ids for the given peer.
     pub fn connection_ids_for_peer(&self, peer_id: &PeerId) -> Vec<ConnectionId> {
         self.peer_connections
             .get(peer_id)
@@ -265,6 +289,7 @@ impl QuicTransport {
             .unwrap_or_default()
     }
 
+    /// Binds a peer identity to a connection, emitting a `PeerIdentityVerified` event.
     pub fn verify_connection_peer_id(
         &mut self,
         id: ConnectionId,
@@ -300,6 +325,7 @@ impl QuicTransport {
         Ok(())
     }
 
+    /// Allocates the next unused connection id, skipping 0 and wrapping on overflow.
     fn allocate_connection_id(&mut self) -> Result<ConnectionId, TransportError> {
         let start = self.next_connection_id;
 
@@ -324,16 +350,19 @@ impl QuicTransport {
         })
     }
 
+    /// Generates a random QUIC source connection id using OS randomness.
     fn generate_scid() -> Result<QuicConnectionId<'static>, getrandom::Error> {
         let mut scid = [0u8; quiche::MAX_CONN_ID_LEN];
         getrandom::fill(&mut scid)?;
         Ok(QuicConnectionId::from_vec(scid.to_vec()))
     }
 
+    /// Adds a connection to the peer-to-connections index.
     fn index_peer_connection(&mut self, peer_id: PeerId, id: ConnectionId) {
         self.peer_connections.entry(peer_id).or_default().insert(id);
     }
 
+    /// Removes a connection from the peer-to-connections index, cleaning up empty entries.
     fn remove_peer_connection(&mut self, peer_id: &PeerId, id: ConnectionId) {
         let mut remove_entry = false;
 
@@ -347,6 +376,7 @@ impl QuicTransport {
         }
     }
 
+    /// Removes all index entries (CID and peer) for a connection.
     fn unindex_connection(&mut self, id: ConnectionId, peer_id: Option<PeerId>) {
         self.cid_to_connection.retain(|_, mapped| *mapped != id);
 

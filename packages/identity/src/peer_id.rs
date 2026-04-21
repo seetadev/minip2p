@@ -10,20 +10,34 @@ use thiserror::Error;
 
 use crate::PublicKey;
 
+/// Multihash code for identity (inline) hashing.
 pub const IDENTITY_MULTIHASH_CODE: u64 = 0x00;
+/// Multihash code for SHA-256 hashing.
 pub const SHA256_MULTIHASH_CODE: u64 = 0x12;
+/// CIDv1 multicodec value for `libp2p-key`.
 pub const LIBP2P_KEY_MULTICODEC: u64 = 0x72;
 
+/// Public keys with protobuf encoding at or below this size are inlined
+/// using identity multihash; larger keys are SHA-256 hashed.
 const MAX_INLINE_KEY_LENGTH: usize = 42;
 
 const BASE58_ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const BASE32_ALPHABET_LOWER: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+
+/// Maximum multihash digest size used for peer ids.
 pub const PEER_ID_MULTIHASH_SIZE: usize = 64;
 
+/// Multihash type used for peer id storage.
 pub type PeerMultihash = Multihash<PEER_ID_MULTIHASH_SIZE>;
 
+/// A libp2p peer id, stored as a multihash.
+///
+/// Peer ids are derived from public keys. Small keys (Ed25519) are inlined
+/// using identity multihash; larger keys (RSA) are SHA-256 hashed.
+///
+/// Supports parsing and formatting in both legacy base58btc and CIDv1
+/// (base32 multibase) forms.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-/// A libp2p peer id represented as raw multihash bytes.
 pub struct PeerId {
     multihash: PeerMultihash,
 }
@@ -162,6 +176,7 @@ impl FromStr for PeerId {
     }
 }
 
+/// Errors that can occur when parsing or validating a peer id.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum PeerIdError {
     #[error("peer id input is empty")]
@@ -188,6 +203,7 @@ pub enum PeerIdError {
     Varint(VarintError),
 }
 
+/// Errors from unsigned varint decoding.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum VarintError {
     #[error("buffer ended before varint terminated")]
@@ -198,6 +214,7 @@ pub enum VarintError {
     NonCanonical,
 }
 
+/// Returns the number of bytes needed to encode `value` as an unsigned varint.
 pub fn uvarint_len(mut value: u64) -> usize {
     let mut len = 1;
     while value >= 0x80 {
@@ -253,6 +270,9 @@ pub fn read_uvarint(input: &[u8]) -> Result<(u64, usize), VarintError> {
     Err(VarintError::BufferTooShort)
 }
 
+/// Validates that a multihash is a legal peer id encoding.
+/// Currently only checks that SHA-256 digests are exactly 32 bytes;
+/// identity-hashed multihashes are accepted with any digest length.
 fn validate_multihash(multihash: &PeerMultihash) -> Result<(), PeerIdError> {
     let digest_len = multihash.digest().len();
     if multihash.code() == SHA256_MULTIHASH_CODE && digest_len != 32 {
@@ -262,13 +282,16 @@ fn validate_multihash(multihash: &PeerMultihash) -> Result<(), PeerIdError> {
     Ok(())
 }
 
-/// Constructs a typed multihash for peer id storage.
+/// Constructs a typed `Multihash<64>` by wrapping the given hash code and digest.
+/// Panics if the digest exceeds the 64-byte capacity (should never happen for peer ids).
 fn build_multihash(code: u64, digest: &[u8]) -> PeerMultihash {
     PeerMultihash::wrap(code, digest)
         .expect("peer id digests are bounded (identity<=42, sha2-256=32)")
 }
 
-/// Encodes bytes as base58btc.
+/// Encodes bytes as base58btc (Bitcoin alphabet).
+/// Preserves leading zero bytes as '1' characters, then converts the remaining
+/// bytes using big-number base conversion from base-256 to base-58.
 fn encode_base58(input: &[u8]) -> String {
     if input.is_empty() {
         return String::new();
@@ -311,6 +334,8 @@ fn encode_base58(input: &[u8]) -> String {
 }
 
 /// Decodes base58btc text into bytes.
+/// Reverses the encoding: leading '1' chars become zero bytes, then performs
+/// big-number base conversion from base-58 back to base-256.
 fn decode_base58(input: &str) -> Result<Vec<u8>, PeerIdError> {
     if input.is_empty() {
         return Err(PeerIdError::EmptyInput);
@@ -352,6 +377,7 @@ fn decode_base58(input: &str) -> Result<Vec<u8>, PeerIdError> {
     Ok(out)
 }
 
+/// Maps a base58btc character to its 0..57 numeric value, or `None` if invalid.
 fn base58_value(c: char) -> Option<u8> {
     BASE58_ALPHABET
         .iter()
@@ -359,7 +385,9 @@ fn base58_value(c: char) -> Option<u8> {
         .map(|idx| idx as u8)
 }
 
-/// RFC4648 base32 (lowercase), no padding.
+/// RFC 4648 base32 encoding, lowercase alphabet, no padding.
+/// Streams input through a bit buffer, emitting 5-bit groups as characters.
+/// Any remaining bits (<5) are left-shifted and emitted as a final character.
 fn encode_base32_nopad_lower(input: &[u8]) -> String {
     if input.is_empty() {
         return String::new();
@@ -388,7 +416,8 @@ fn encode_base32_nopad_lower(input: &[u8]) -> String {
     out
 }
 
-/// Decodes RFC4648 base32 (case-insensitive), no padding.
+/// Decodes RFC 4648 base32 (case-insensitive), no padding.
+/// Accumulates 5-bit values into a bit buffer, emitting full bytes as they form.
 fn decode_base32_nopad(input: &str) -> Result<Vec<u8>, PeerIdError> {
     if input.is_empty() {
         return Ok(Vec::new());
@@ -416,6 +445,7 @@ fn decode_base32_nopad(input: &str) -> Result<Vec<u8>, PeerIdError> {
     Ok(out)
 }
 
+/// Maps a base32 character (case-insensitive) to its 0..31 numeric value, or `None` if invalid.
 fn base32_value(c: char) -> Option<u8> {
     let lower = c.to_ascii_lowercase();
     match lower {

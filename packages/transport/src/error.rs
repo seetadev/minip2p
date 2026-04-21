@@ -4,6 +4,7 @@ use thiserror::Error;
 
 use crate::{ConnectionId, StreamId};
 
+/// Errors returned by [`Transport`](crate::Transport) operations.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum TransportError {
     #[error("invalid address for {context}: {reason}")]

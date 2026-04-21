@@ -1,3 +1,8 @@
+//! Sans-IO transport trait and connection/stream types for minip2p.
+//!
+//! Defines the [`Transport`] trait that concrete adapters implement, along with
+//! event, action, error, and identifier types. `no_std` + `alloc` compatible.
+
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;

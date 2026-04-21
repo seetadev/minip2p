@@ -2,6 +2,7 @@ use alloc::string::String;
 
 use minip2p_identity::PeerId;
 
+/// A single component of a multiaddr.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Protocol {
     Ip4([u8; 4]),
@@ -15,6 +16,7 @@ pub enum Protocol {
 }
 
 impl Protocol {
+    /// Returns `true` if this protocol represents a network host (IP or DNS).
     pub fn is_host(&self) -> bool {
         matches!(
             self,

@@ -1,3 +1,8 @@
+//! Per-connection state management for the QUIC transport.
+//!
+//! Handles the QUIC connection lifecycle, stream multiplexing, send queue
+//! draining, and event emission.
+
 use std::collections::{HashMap, VecDeque};
 use std::net::{SocketAddr, UdpSocket};
 
@@ -8,14 +13,19 @@ use minip2p_transport::{
 
 const SEND_BUF_SIZE: usize = 1350;
 
+/// A queued write operation for a QUIC stream.
 #[derive(Clone, Debug)]
 struct PendingStreamWrite {
+    /// Payload bytes to send.
     bytes: Vec<u8>,
+    /// Number of bytes already sent from this write.
     offset: usize,
+    /// If true, this write closes the stream's write side.
     fin: bool,
 }
 
 impl PendingStreamWrite {
+    /// Creates a data write.
     fn data(bytes: Vec<u8>) -> Self {
         Self {
             bytes,
@@ -24,6 +34,7 @@ impl PendingStreamWrite {
         }
     }
 
+    /// Creates a FIN-only write (empty payload, closes write side).
     fn fin() -> Self {
         Self {
             bytes: Vec::new(),
@@ -33,36 +44,52 @@ impl PendingStreamWrite {
     }
 }
 
+/// Per-stream bookkeeping for half-close tracking and pending writes.
 #[derive(Clone, Debug, Default)]
 struct StreamRuntimeState {
+    /// Outbound write queue.
     pending_writes: VecDeque<PendingStreamWrite>,
+    /// Whether we have closed our write side.
     local_write_closed: bool,
+    /// Whether the remote has closed their write side.
     remote_write_closed: bool,
+    /// Whether an IncomingStream event was emitted for this stream.
     incoming_notified: bool,
+    /// Whether a StreamClosed event was emitted.
     closed_notified: bool,
 }
 
 impl StreamRuntimeState {
+    /// Marks the local write side as closed.
     fn on_local_write_closed(&mut self) {
         self.local_write_closed = true;
     }
 
+    /// Marks the remote write side as closed.
     fn on_remote_write_closed(&mut self) {
         self.remote_write_closed = true;
     }
 
+    /// Returns true if both sides have closed their write side.
     fn is_fully_closed(&self) -> bool {
         self.local_write_closed && self.remote_write_closed
     }
 }
 
 pub struct QuicConnection {
+    /// Logical connection id assigned by the transport.
     id: ConnectionId,
+    /// The underlying quiche QUIC connection.
     conn: quiche::Connection,
+    /// Remote peer's socket address.
     peer_addr: SocketAddr,
+    /// Connection endpoint metadata (transport address + optional peer id).
     endpoint: ConnectionEndpoint,
+    /// Current connection lifecycle state.
     state: ConnectionState,
+    /// Per-stream runtime state keyed by raw QUIC stream id.
     stream_states: HashMap<u64, StreamRuntimeState>,
+    /// Next stream id to allocate (increments by 4 per QUIC spec).
     next_local_bidi_stream_id: u64,
 }
 
@@ -333,6 +360,7 @@ impl QuicConnection {
         Ok(())
     }
 
+    /// Sends all pending quiche output packets via the UDP socket.
     fn flush(&mut self, socket: &UdpSocket) -> Result<(), TransportError> {
         let mut out = [0u8; SEND_BUF_SIZE];
         loop {
@@ -357,6 +385,7 @@ impl QuicConnection {
         Ok(())
     }
 
+    /// Pushes queued stream writes into quiche, handling partial writes.
     fn drain_send_queue(&mut self, events: &mut Vec<TransportEvent>) -> Result<(), TransportError> {
         let stream_ids: Vec<u64> = self.stream_states.keys().copied().collect();
 
@@ -411,6 +440,7 @@ impl QuicConnection {
         Ok(())
     }
 
+    /// Emits IncomingStream for remote-initiated streams not yet notified.
     fn ensure_stream_discovered(&mut self, stream_id: StreamId, events: &mut Vec<TransportEvent>) {
         let is_remote = self.is_remote_initiated_stream(stream_id.as_u64());
         let state = self.stream_states.entry(stream_id.as_u64()).or_default();
@@ -424,6 +454,7 @@ impl QuicConnection {
         }
     }
 
+    /// Emits StreamClosed if both sides are closed and not yet notified.
     fn note_stream_closed_if_finished(
         &mut self,
         stream_id: StreamId,
@@ -440,6 +471,7 @@ impl QuicConnection {
         }
     }
 
+    /// Removes stream state entries that are fully closed and drained.
     fn gc_closed_streams(&mut self) {
         let to_remove: Vec<u64> = self
             .stream_states
@@ -458,6 +490,7 @@ impl QuicConnection {
         }
     }
 
+    /// Returns the stream state, creating it for locally-initiated streams.
     fn get_or_create_local_stream_state(
         &mut self,
         stream_id: StreamId,
@@ -479,11 +512,13 @@ impl QuicConnection {
         Ok(self.stream_states.entry(stream_id.as_u64()).or_default())
     }
 
+    /// Checks if a stream id was initiated by this side (QUIC parity bit check).
     fn is_local_initiated_stream(&self, stream_id: u64) -> bool {
         let local_initiator_bit = if self.conn.is_server() { 1 } else { 0 };
         (stream_id & 0x1) == local_initiator_bit
     }
 
+    /// Checks if a stream id was initiated by the remote side.
     fn is_remote_initiated_stream(&self, stream_id: u64) -> bool {
         !self.is_local_initiated_stream(stream_id)
     }

@@ -4,6 +4,9 @@ use minip2p_identity::PeerId;
 
 use crate::{Multiaddr, PeerAddrError, Protocol};
 
+/// A validated peer address: a transport [`Multiaddr`] paired with a [`PeerId`].
+///
+/// The transport portion must not contain `/p2p` and the peer id is always terminal.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct PeerAddr {
     transport: Multiaddr,
@@ -11,6 +14,7 @@ pub struct PeerAddr {
 }
 
 impl PeerAddr {
+    /// Creates a peer address from a transport multiaddr and peer id.
     pub fn new(transport: Multiaddr, peer_id: PeerId) -> Result<Self, PeerAddrError> {
         if transport
             .protocols()
@@ -27,8 +31,10 @@ impl PeerAddr {
         Ok(Self { transport, peer_id })
     }
 
+    /// Extracts a peer address from a multiaddr with a terminal `/p2p/<peer-id>`.
     pub fn from_multiaddr(multiaddr: &Multiaddr) -> Result<Self, PeerAddrError> {
         let protocols = multiaddr.protocols();
+        // Find the last /p2p component; it must be the final protocol (terminal).
         let last = protocols
             .iter()
             .rposition(|protocol| matches!(protocol, Protocol::P2p(_)))
@@ -38,6 +44,8 @@ impl PeerAddr {
             return Err(PeerAddrError::NonTerminalPeerId);
         }
 
+        // Find the first /p2p component; if it differs from `last`, there are
+        // multiple /p2p segments, which is not allowed.
         let first = protocols
             .iter()
             .position(|protocol| matches!(protocol, Protocol::P2p(_)))
@@ -61,18 +69,22 @@ impl PeerAddr {
         Ok(Self { transport, peer_id })
     }
 
+    /// Returns the transport portion (without `/p2p`).
     pub fn transport(&self) -> &Multiaddr {
         &self.transport
     }
 
+    /// Returns the peer id.
     pub fn peer_id(&self) -> &PeerId {
         &self.peer_id
     }
 
+    /// Consumes this value and returns the transport and peer id.
     pub fn into_parts(self) -> (Multiaddr, PeerId) {
         (self.transport, self.peer_id)
     }
 
+    /// Rebuilds the full multiaddr with the terminal `/p2p/<peer-id>`.
     pub fn to_multiaddr(&self) -> Multiaddr {
         let mut protocols = self.transport.protocols().to_vec();
         protocols.push(Protocol::P2p(self.peer_id.clone()));

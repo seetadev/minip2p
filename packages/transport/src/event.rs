@@ -5,6 +5,7 @@ use minip2p_core::{Multiaddr, PeerId};
 
 use crate::{ConnectionEndpoint, ConnectionId, StreamId};
 
+/// Events emitted by a transport back to the host.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransportEvent {
     Connected {

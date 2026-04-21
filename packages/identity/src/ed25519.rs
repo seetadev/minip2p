@@ -19,6 +19,7 @@ pub struct Ed25519Keypair {
     public_key: [u8; ED25519_PUBLIC_KEY_LENGTH],
 }
 
+/// Custom `Debug` impl that redacts the secret key to prevent accidental leakage in logs.
 impl fmt::Debug for Ed25519Keypair {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Ed25519Keypair")
@@ -86,12 +87,14 @@ impl Ed25519Keypair {
     }
 }
 
+/// Convenience conversion: extracts the libp2p `PublicKey` from an Ed25519 keypair.
 impl From<&Ed25519Keypair> for PublicKey {
     fn from(keypair: &Ed25519Keypair) -> Self {
         keypair.public_key()
     }
 }
 
+/// Convenience conversion: derives a `PeerId` directly from an Ed25519 keypair.
 impl From<&Ed25519Keypair> for PeerId {
     fn from(keypair: &Ed25519Keypair) -> Self {
         keypair.peer_id()

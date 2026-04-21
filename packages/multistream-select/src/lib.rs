@@ -1,3 +1,8 @@
+//! Sans-IO state machine for `/multistream/1.0.0` protocol negotiation.
+//!
+//! Messages use varint-length-prefixed framing per the libp2p spec.
+//! `no_std` + `alloc` compatible.
+
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
@@ -8,18 +13,27 @@ use alloc::vec::Vec;
 use minip2p_core::{read_uvarint, uvarint_len, write_uvarint, VarintError};
 use thiserror::Error;
 
+/// The multistream-select protocol identifier.
 pub const MULTISTREAM_PROTOCOL_ID: &str = "/multistream/1.0.0";
+/// The "not available" response sent when a protocol is unsupported.
 const NOT_AVAILABLE: &str = "na";
+/// Maximum allowed message payload length in bytes.
 const MAX_MESSAGE_LEN: usize = 1024;
 
+/// Output produced by the negotiation state machine.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MultistreamOutput {
+    /// Bytes to send to the remote peer.
     OutboundData(Vec<u8>),
+    /// Protocol negotiation succeeded.
     Negotiated { protocol: String },
+    /// The remote peer does not support the requested protocol.
     NotAvailable,
+    /// A protocol-level error occurred; negotiation is terminated.
     ProtocolError { reason: String },
 }
 
+/// Errors encountered during multistream-select framing or negotiation.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum MultistreamError {
     #[error("message exceeds maximum length ({len} > {MAX_MESSAGE_LEN})")]
@@ -38,20 +52,27 @@ pub enum MultistreamError {
     UnexpectedProtocolResponse { actual: String },
 }
 
+/// Whether this side initiated (Dialer) or accepted (Listener) the negotiation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Role {
     Dialer,
     Listener,
 }
 
+/// Internal state machine states for the multistream-select handshake.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum State {
+    /// Expecting the remote's multistream protocol header.
     WaitingForRemoteHeader,
+    /// Listener waiting for the dialer's protocol proposal.
     WaitingForProtocolRequest,
+    /// Dialer waiting for the listener's protocol confirmation or rejection.
     WaitingForProtocolResponse,
+    /// Negotiation finished (success or error).
     Done,
 }
 
+/// Multistream-select negotiation state machine.
 pub struct MultistreamSelect {
     role: Role,
     state: State,
@@ -62,6 +83,7 @@ pub struct MultistreamSelect {
 }
 
 impl MultistreamSelect {
+    /// Creates a dialer that will propose `desired_protocol`.
     pub fn dialer(desired_protocol: impl Into<String>) -> Self {
         Self {
             role: Role::Dialer,
@@ -73,6 +95,7 @@ impl MultistreamSelect {
         }
     }
 
+    /// Creates a listener that accepts connections for the given protocols.
     pub fn listener(protocols: impl IntoIterator<Item = String>) -> Self {
         Self {
             role: Role::Listener,
@@ -84,6 +107,7 @@ impl MultistreamSelect {
         }
     }
 
+    /// Produces the initial multistream header to send. Idempotent.
     pub fn start(&mut self) -> Vec<MultistreamOutput> {
         if self.started {
             return Vec::new();
@@ -95,6 +119,7 @@ impl MultistreamSelect {
         ))]
     }
 
+    /// Feeds received bytes into the state machine and returns any outputs.
     pub fn receive(&mut self, bytes: &[u8]) -> Vec<MultistreamOutput> {
         if self.state == State::Done {
             return Vec::new();
@@ -125,6 +150,7 @@ impl MultistreamSelect {
         outputs
     }
 
+    /// Processes a single decoded protocol line and advances the state machine.
     fn on_message(&mut self, line: &str) -> Vec<MultistreamOutput> {
         match self.state {
             State::WaitingForRemoteHeader => {
@@ -190,6 +216,7 @@ impl MultistreamSelect {
         }
     }
 
+    /// Transitions to Done and returns a ProtocolError output.
     fn protocol_error(&mut self, error: MultistreamError) -> Vec<MultistreamOutput> {
         self.state = State::Done;
         vec![MultistreamOutput::ProtocolError {
@@ -210,6 +237,7 @@ fn encode_message(protocol: &str) -> Vec<u8> {
     out
 }
 
+/// Result of attempting to decode a varint-framed message from the buffer.
 enum DecodeResult<'a> {
     /// A complete message was decoded.
     Complete { payload: &'a str, consumed: usize },

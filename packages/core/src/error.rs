@@ -3,6 +3,7 @@ use alloc::string::String;
 use minip2p_identity::PeerIdError;
 use thiserror::Error;
 
+/// Errors from parsing a multiaddr string.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum MultiaddrError {
     #[error("multiaddr input is empty")]
@@ -31,6 +32,7 @@ pub enum MultiaddrError {
     },
 }
 
+/// Errors from parsing or constructing a peer address.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum PeerAddrError {
     #[error("multiaddr parse error: {0}")]

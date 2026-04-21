@@ -1,3 +1,8 @@
+//! Sans-IO state machine for the `/ipfs/ping/1.0.0` protocol.
+//!
+//! Handles both dialer (send ping, measure RTT) and listener (echo payload)
+//! roles. `no_std` + `alloc` compatible.
+
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
@@ -10,11 +15,15 @@ use minip2p_core::PeerId;
 use minip2p_transport::StreamId;
 use thiserror::Error;
 
+/// The ping protocol identifier.
 pub const PING_PROTOCOL_ID: &str = "/ipfs/ping/1.0.0";
+/// Required ping payload size in bytes.
 pub const PING_PAYLOAD_LEN: usize = 32;
 
+/// Configuration for the ping protocol.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PingConfig {
+    /// Maximum time in milliseconds to wait for a ping response before timing out.
     pub request_timeout_ms: u64,
 }
 
@@ -26,52 +35,64 @@ impl Default for PingConfig {
     }
 }
 
+/// Commands the host must execute on behalf of the ping protocol.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PingAction {
+    /// Send ping payload bytes on a stream.
     Send {
         peer_id: PeerId,
         stream_id: StreamId,
         data: [u8; PING_PAYLOAD_LEN],
     },
+    /// Half-close the write side of a stream.
     CloseStreamWrite {
         peer_id: PeerId,
         stream_id: StreamId,
     },
+    /// Abruptly reset a stream.
     ResetStream {
         peer_id: PeerId,
         stream_id: StreamId,
     },
 }
 
+/// Events emitted by the ping protocol.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PingEvent {
+    /// An outbound ping stream was registered for a peer.
     OutboundStreamRegistered {
         peer_id: PeerId,
         stream_id: StreamId,
     },
+    /// An inbound ping stream was accepted.
     InboundStreamAccepted {
         peer_id: PeerId,
         stream_id: StreamId,
     },
+    /// A ping round-trip completed successfully.
     RttMeasured {
         peer_id: PeerId,
         stream_id: StreamId,
         rtt_ms: u64,
     },
+    /// A ping request timed out.
     Timeout {
         peer_id: PeerId,
         stream_id: StreamId,
         timeout_ms: u64,
     },
+    /// The outbound ping stream was closed.
     OutboundStreamClosed {
         peer_id: PeerId,
         stream_id: StreamId,
     },
+    /// A peer exceeded the maximum number of inbound streams.
     StreamLimitExceeded {
         peer_id: PeerId,
         stream_id: StreamId,
         limit: usize,
     },
+    /// The remote peer violated the ping protocol.
     ProtocolViolation {
         peer_id: PeerId,
         stream_id: StreamId,
@@ -79,6 +100,7 @@ pub enum PingEvent {
     },
 }
 
+/// Errors returned by ping protocol operations.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum PingError {
     #[error("peer {peer_id} already has outbound ping stream {existing_stream}")]
@@ -97,24 +119,35 @@ pub enum PingError {
     InvalidPayloadLength { actual: usize },
 }
 
+/// A ping request that has been sent and is awaiting a response.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingPing {
+    /// The 32-byte payload that was sent.
     payload: [u8; PING_PAYLOAD_LEN],
+    /// Timestamp (caller-provided) when the ping was sent.
     sent_at_ms: u64,
 }
 
+/// Per-peer state tracking for the ping protocol.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct PeerPingState {
+    /// The single outbound stream used for sending pings to this peer.
     outbound_stream: Option<StreamId>,
+    /// Inbound streams on which this peer sends pings to us.
     inbound_streams: BTreeSet<StreamId>,
+    /// The in-flight outbound ping, if any.
     pending_ping: Option<PendingPing>,
     /// Per-stream receive buffers to handle fragmented data delivery.
     recv_bufs: BTreeMap<StreamId, Vec<u8>>,
 }
 
+/// The ping protocol state machine.
 pub struct PingProtocol {
+    /// Per-peer protocol state.
     peers: BTreeMap<PeerId, PeerPingState>,
+    /// Events buffered until the next `poll_events` call.
     pending_events: Vec<PingEvent>,
+    /// Protocol configuration.
     config: PingConfig,
 }
 
@@ -125,6 +158,7 @@ impl Default for PingProtocol {
 }
 
 impl PingProtocol {
+    /// Creates a new ping protocol instance with the given configuration.
     pub fn new(config: PingConfig) -> Self {
         Self {
             peers: BTreeMap::new(),
@@ -133,6 +167,7 @@ impl PingProtocol {
         }
     }
 
+    /// Registers a negotiated outbound stream for a peer.
     pub fn register_outbound_stream(
         &mut self,
         peer_id: PeerId,
@@ -158,6 +193,7 @@ impl PingProtocol {
         Ok(())
     }
 
+    /// Registers a negotiated inbound stream from a peer.
     pub fn register_inbound_stream(
         &mut self,
         peer_id: PeerId,
@@ -184,6 +220,7 @@ impl PingProtocol {
         Vec::new()
     }
 
+    /// Sends a ping with the given 32-byte payload. Returns the action to execute.
     pub fn send_ping(
         &mut self,
         peer_id: &PeerId,
@@ -224,6 +261,7 @@ impl PingProtocol {
         })
     }
 
+    /// Half-closes the outbound stream. Fails if a ping is in flight.
     pub fn close_outbound_stream_write(
         &mut self,
         peer_id: &PeerId,
@@ -248,6 +286,7 @@ impl PingProtocol {
         })
     }
 
+    /// Feeds received stream data into the protocol. Returns actions to execute.
     pub fn on_stream_data(
         &mut self,
         peer_id: &PeerId,
@@ -307,6 +346,7 @@ impl PingProtocol {
         self.process_complete_payload(peer_id, stream_id, payload, now_ms)
     }
 
+    /// Handles a fully buffered 32-byte payload on either an outbound or inbound stream.
     fn process_complete_payload(
         &mut self,
         peer_id: &PeerId,
@@ -353,6 +393,7 @@ impl PingProtocol {
         Vec::new()
     }
 
+    /// Notifies the protocol that the remote peer closed its write side.
     pub fn on_stream_remote_write_closed(
         &mut self,
         peer_id: &PeerId,
@@ -386,6 +427,7 @@ impl PingProtocol {
         Vec::new()
     }
 
+    /// Notifies the protocol that a stream was fully closed.
     pub fn on_stream_closed(&mut self, peer_id: &PeerId, stream_id: StreamId) {
         let Some(peer) = self.peers.get_mut(peer_id) else {
             return;
@@ -405,6 +447,7 @@ impl PingProtocol {
         self.peers.remove(peer_id);
     }
 
+    /// Checks for timed-out ping requests. Call periodically.
     pub fn on_tick(&mut self, now_ms: u64) -> Vec<PingAction> {
         let mut actions = Vec::new();
 
@@ -440,10 +483,12 @@ impl PingProtocol {
         actions
     }
 
+    /// Drains and returns all pending events.
     pub fn poll_events(&mut self) -> Vec<PingEvent> {
         core::mem::take(&mut self.pending_events)
     }
 
+    /// Emits a ProtocolViolation event and returns a ResetStream action.
     fn protocol_violation(
         &mut self,
         peer_id: &PeerId,

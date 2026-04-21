@@ -1,5 +1,6 @@
 use minip2p_core::{Multiaddr, PeerAddr, PeerId};
 
+/// One side of a connection, combining a transport address with an optional peer identity.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ConnectionEndpoint {
     transport: Multiaddr,
@@ -7,6 +8,7 @@ pub struct ConnectionEndpoint {
 }
 
 impl ConnectionEndpoint {
+    /// Creates an endpoint with no peer identity.
     pub fn new(transport: Multiaddr) -> Self {
         Self {
             transport,
@@ -14,6 +16,7 @@ impl ConnectionEndpoint {
         }
     }
 
+    /// Creates an endpoint with a known peer identity.
     pub fn with_peer_id(transport: Multiaddr, peer_id: PeerId) -> Self {
         Self {
             transport,
@@ -21,31 +24,38 @@ impl ConnectionEndpoint {
         }
     }
 
+    /// Creates an endpoint from a [`PeerAddr`].
     pub fn from_peer_addr(addr: &PeerAddr) -> Self {
         Self::with_peer_id(addr.transport().clone(), addr.peer_id().clone())
     }
 
+    /// Returns the transport address.
     pub fn transport(&self) -> &Multiaddr {
         &self.transport
     }
 
+    /// Returns the peer identity, if known.
     pub fn peer_id(&self) -> Option<&PeerId> {
         self.peer_id.as_ref()
     }
 
+    /// Sets the peer identity.
     pub fn set_peer_id(&mut self, peer_id: PeerId) {
         self.peer_id = Some(peer_id);
     }
 
+    /// Removes the peer identity.
     pub fn clear_peer_id(&mut self) {
         self.peer_id = None;
     }
 
+    /// Converts to a [`PeerAddr`], returning `None` if no peer id is set.
     pub fn to_peer_addr(&self) -> Option<PeerAddr> {
         let peer_id = self.peer_id.as_ref()?.clone();
         PeerAddr::new(self.transport.clone(), peer_id).ok()
     }
 
+    /// Consumes this value and returns the transport address and optional peer id.
     pub fn into_parts(self) -> (Multiaddr, Option<PeerId>) {
         (self.transport, self.peer_id)
     }
