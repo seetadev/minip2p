@@ -4,7 +4,8 @@
 //! time internally, auto-allocates connection ids, and translates between
 //! the Sans-I/O core's actions and concrete transport calls.
 
-use std::time::Instant;
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use minip2p_core::{Multiaddr, PeerAddr, PeerId};
 use minip2p_identify::IdentifyConfig;
@@ -13,6 +14,10 @@ use minip2p_transport::{ConnectionId, StreamId, Transport, TransportError};
 
 use crate::core::SwarmCore;
 use crate::events::{SwarmAction, SwarmError, SwarmEvent};
+
+/// Sleep cadence when [`Swarm::poll_next`] idles. Chosen to match the
+/// polling cadence used by existing integration tests.
+const POLL_IDLE_SLEEP: Duration = Duration::from_millis(5);
 
 /// Thin std driver wrapping [`SwarmCore`] and a concrete [`Transport`].
 ///
@@ -29,6 +34,12 @@ pub struct Swarm<T: Transport> {
     /// Our own `PeerId`. Cached from the [`crate::SwarmBuilder`]'s keypair
     /// so applications don't have to drill into the transport to get it.
     local_peer_id: PeerId,
+
+    /// Buffer of events yielded by [`Swarm::poll`] that haven't yet been
+    /// consumed by [`Swarm::poll_next`]. Each `poll()` returns a batch;
+    /// `poll_next` hands them out one at a time and calls `poll()` again
+    /// when the buffer drains.
+    event_buffer: VecDeque<SwarmEvent>,
 
     /// Auto-incrementing connection-id counter for outbound dials.
     next_connection_id: u64,
@@ -53,6 +64,7 @@ impl<T: Transport> Swarm<T> {
             transport,
             core: SwarmCore::new(identify_config, ping_config),
             local_peer_id,
+            event_buffer: VecDeque::new(),
             next_connection_id: 1,
             start: Instant::now(),
         }
@@ -203,6 +215,10 @@ impl<T: Transport> Swarm<T> {
 
     /// Drive the swarm: poll transport, feed events to core, dispatch
     /// actions, return application-visible events. Must be called repeatedly.
+    ///
+    /// Most event-loop code can be simpler to write against
+    /// [`Swarm::poll_next`] or [`Swarm::run_until`], which internally
+    /// call this in a sleep/poll loop and return one event at a time.
     pub fn poll(&mut self) -> Result<Vec<SwarmEvent>, TransportError> {
         let now_ms = self.now_ms();
 
@@ -220,6 +236,66 @@ impl<T: Transport> Swarm<T> {
 
         // 4. Return the application's events.
         Ok(self.core.poll_events())
+    }
+
+    /// Returns the next swarm event, sleeping internally until one arrives
+    /// or `deadline` is reached.
+    ///
+    /// `Ok(Some(ev))` — a fresh event is ready. `Ok(None)` — `deadline`
+    /// passed before any event arrived. `Err(_)` — transport-level error.
+    ///
+    /// Makes single-event CLIs and scripts much easier to write than the
+    /// raw [`Swarm::poll`] loop: no sleep-then-match-all-events
+    /// boilerplate.
+    pub fn poll_next(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<Option<SwarmEvent>, TransportError> {
+        loop {
+            if let Some(ev) = self.event_buffer.pop_front() {
+                return Ok(Some(ev));
+            }
+            // Always poll at least once -- even if we're already past the
+            // deadline -- so a caller using a short or elapsed deadline
+            // still sees any events the transport has already produced.
+            let events = self.poll()?;
+            self.event_buffer.extend(events);
+            if let Some(ev) = self.event_buffer.pop_front() {
+                return Ok(Some(ev));
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(POLL_IDLE_SLEEP);
+        }
+    }
+
+    /// Polls events in a loop, returning the first one for which
+    /// `predicate` returns `true`, or `Ok(None)` if `deadline` expires
+    /// first.
+    ///
+    /// `predicate` sees every event as it arrives (even the ones that
+    /// don't trigger a return), so it's the natural place to put event
+    /// logging. Events for which `predicate` returns `false` are
+    /// discarded.
+    pub fn run_until<F>(
+        &mut self,
+        deadline: Instant,
+        mut predicate: F,
+    ) -> Result<Option<SwarmEvent>, TransportError>
+    where
+        F: FnMut(&SwarmEvent) -> bool,
+    {
+        loop {
+            match self.poll_next(deadline)? {
+                None => return Ok(None),
+                Some(ev) => {
+                    if predicate(&ev) {
+                        return Ok(Some(ev));
+                    }
+                }
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
