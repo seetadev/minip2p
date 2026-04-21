@@ -101,4 +101,52 @@ pub trait Transport {
     /// Must be called regularly. Never blocks -- returns an empty vec when
     /// there is no work to do.
     fn poll(&mut self) -> Result<Vec<TransportEvent>, TransportError>;
+
+    /// Returns the transport multiaddrs this node is currently listening
+    /// on.
+    ///
+    /// The swarm driver snapshots this on each `poll()` tick and uses it
+    /// to auto-populate Identify's `listen_addrs` so remote peers learn
+    /// where they can reach us. Returning an empty vec is valid for
+    /// transports that don't bind (outbound-only) or haven't bound yet.
+    ///
+    /// Default implementation returns empty; adapters that know their
+    /// bound addresses should override.
+    fn local_addresses(&self) -> Vec<Multiaddr> {
+        Vec::new()
+    }
+
+    /// Returns the number of active connections the transport is
+    /// currently managing (dialed + accepted, pre-`Closed`).
+    ///
+    /// Intended for coarse heuristics -- e.g. counting total active
+    /// connections. For address-specific matching use
+    /// [`active_connection_sources`](Transport::active_connection_sources).
+    ///
+    /// Default implementation returns 0; adapters should override.
+    fn active_connection_count(&self) -> usize {
+        0
+    }
+
+    /// Returns the remote transport address for every active connection
+    /// (dialed + accepted, pre-`Closed`).
+    ///
+    /// Each multiaddr is the *remote* side of the connection as the
+    /// transport observes it (source address for accepted connections,
+    /// dialed address for outbound connections). Note this does **not**
+    /// include any `/p2p/<peer-id>` suffix -- peer identity lives on
+    /// `ConnectionEndpoint`, not in this address.
+    ///
+    /// Callers that need to correlate incoming connections with a
+    /// specific remote peer (e.g. a hole-punch listener matching an
+    /// inbound QUIC connection against addresses learned from DCUtR)
+    /// should use this in preference to
+    /// [`active_connection_count`](Transport::active_connection_count),
+    /// which is too coarse to distinguish the intended peer from
+    /// unrelated probes.
+    ///
+    /// Default implementation returns empty; adapters should override.
+    fn active_connection_sources(&self) -> Vec<Multiaddr> {
+        Vec::new()
+    }
 }

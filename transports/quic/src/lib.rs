@@ -649,6 +649,25 @@ impl Transport for QuicTransport {
         Ok(())
     }
 
+    fn local_addresses(&self) -> Vec<Multiaddr> {
+        // If the socket isn't bound for some reason (shouldn't happen in
+        // normal usage -- we bind at construction time), return empty
+        // rather than propagate the error. The swarm uses this only to
+        // enrich Identify; a missing value is never fatal.
+        self.local_multiaddr().map(|addr| vec![addr]).unwrap_or_default()
+    }
+
+    fn active_connection_count(&self) -> usize {
+        self.connections.len()
+    }
+
+    fn active_connection_sources(&self) -> Vec<Multiaddr> {
+        self.connections
+            .values()
+            .map(|conn| conn.endpoint().transport().clone())
+            .collect()
+    }
+
     fn poll(&mut self) -> Result<Vec<TransportEvent>, TransportError> {
         let mut buf = [0u8; 65535];
         let mut events = std::mem::take(&mut self.pending_events);

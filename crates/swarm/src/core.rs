@@ -115,6 +115,11 @@ pub struct SwarmCore {
     /// Peers with a pending `.ping(peer)` call: once the ping stream
     /// negotiates, the queued 32-byte payload is sent automatically.
     pending_pings: BTreeMap<PeerId, [u8; PING_PAYLOAD_LEN]>,
+    /// Snapshot of the transport's local listening addresses, refreshed
+    /// by the driver at the top of each `poll()` tick. Used to
+    /// auto-populate Identify's `listen_addrs` so advertised addresses
+    /// always reflect what we're actually bound to.
+    local_addresses: Vec<Multiaddr>,
 
     // --- Output queues ---
     events: Vec<SwarmEvent>,
@@ -144,9 +149,20 @@ impl SwarmCore {
             supported_protocols,
             user_protocols: Vec::new(),
             pending_pings: BTreeMap::new(),
+            local_addresses: Vec::new(),
             events: Vec::new(),
             actions: Vec::new(),
         }
+    }
+
+    /// Updates the core's snapshot of the transport's local listening
+    /// addresses.
+    ///
+    /// The std driver calls this at the top of each `poll()` tick; a
+    /// Sans-I/O caller should call it whenever its transport's bound
+    /// set changes (e.g. after `listen()` or `close()` on a listener).
+    pub fn set_local_addresses(&mut self, addrs: Vec<Multiaddr>) {
+        self.local_addresses = addrs;
     }
 
     /// Registers a user protocol id that this swarm will accept on inbound
@@ -1008,10 +1024,15 @@ impl SwarmCore {
             // endpoint for this conn_id, in which case we legitimately
             // can't fill observedAddr and the field is omitted.
             let observed_addr = self.conn_to_remote_addr.get(&conn_id).cloned();
-            match self
-                .identify
-                .register_outbound_stream(peer_id, stream_id, observed_addr)
-            {
+            // Snapshot of the transport's listening addresses at this
+            // moment; the driver keeps `local_addresses` refreshed.
+            let listen_addrs = self.local_addresses.as_slice();
+            match self.identify.register_outbound_stream(
+                peer_id,
+                stream_id,
+                observed_addr,
+                listen_addrs,
+            ) {
                 Ok(actions) => {
                     // Only record ownership on success, so a rejected
                     // registration doesn't leave the stream tracked here
