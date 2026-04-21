@@ -7,11 +7,11 @@ edition = "2024"
 minip2p-transport = { path = "../../packages/transport" }
 minip2p-identity = { path = "../../packages/identity" }
 minip2p-core = { path = "../../packages/core" }
+minip2p-tls = { path = "../../packages/tls" }
 quiche = "0.28"
-getrandom = "0.3"
+getrandom = "0.4"
+tempfile = "3"
 
 [dev-dependencies]
 minip2p-multistream-select = { path = "../../packages/multistream-select" }
 minip2p-ping = { path = "../../packages/ping" }
-rcgen = "0.14"
-tempfile = "3"

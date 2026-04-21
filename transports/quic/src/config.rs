@@ -1,67 +1,64 @@
+use minip2p_core::PeerId;
+use minip2p_identity::Ed25519Keypair;
+
 /// Configuration for a QUIC transport node.
+///
+/// Use [`with_keypair`](Self::with_keypair) to create a node with a libp2p
+/// identity. A TLS certificate is auto-generated from the keypair, and the
+/// remote peer's identity is verified automatically after each QUIC handshake.
 #[derive(Clone, Debug)]
 pub struct QuicNodeConfig {
-    pub(crate) local_cert_chain_path: Option<String>,
-    pub(crate) local_priv_key_path: Option<String>,
-    pub(crate) peer_verification: bool,
+    /// Ed25519 host keypair for libp2p TLS identity.
+    pub(crate) keypair: Option<Ed25519Keypair>,
 }
 
 impl Default for QuicNodeConfig {
     fn default() -> Self {
-        Self {
-            local_cert_chain_path: None,
-            local_priv_key_path: None,
-            peer_verification: false,
-        }
+        Self { keypair: None }
     }
 }
 
 impl QuicNodeConfig {
-    /// Creates a default configuration (no TLS, no peer verification).
+    /// Creates an empty configuration (no identity, cannot listen).
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Convenience config for a development dialer (no TLS, no verification).
+    /// Creates a configuration from an Ed25519 host keypair.
+    ///
+    /// A libp2p-spec TLS certificate is auto-generated from the keypair. Both
+    /// dialing and listening are enabled. Peer identity is verified
+    /// automatically after each QUIC handshake.
+    pub fn with_keypair(keypair: Ed25519Keypair) -> Self {
+        Self {
+            keypair: Some(keypair),
+        }
+    }
+
+    /// Convenience: generates a fresh keypair for a dev/test dialer.
     pub fn dev_dialer() -> Self {
-        Self::new().with_peer_verification(false)
+        Self::with_keypair(Ed25519Keypair::generate())
     }
 
-    /// Convenience config for a development listener with TLS.
-    pub fn dev_listener_with_tls(cert: impl Into<String>, key: impl Into<String>) -> Self {
-        Self::dev_dialer().with_local_tls_files(cert, key)
+    /// Convenience: generates a fresh keypair for a dev/test listener.
+    pub fn dev_listener() -> Self {
+        Self::with_keypair(Ed25519Keypair::generate())
     }
 
-    /// Sets the local TLS certificate chain and private key PEM file paths.
-    pub fn with_local_tls_files(mut self, cert: impl Into<String>, key: impl Into<String>) -> Self {
-        self.local_cert_chain_path = Some(cert.into());
-        self.local_priv_key_path = Some(key.into());
-        self
-    }
-
-    /// Enables or disables peer certificate verification.
-    pub fn with_peer_verification(mut self, verify: bool) -> Self {
-        self.peer_verification = verify;
-        self
+    /// Returns this node's `PeerId`, derived from the configured keypair.
+    ///
+    /// Returns `None` if no keypair is configured.
+    pub fn peer_id(&self) -> Option<PeerId> {
+        self.keypair.as_ref().map(|kp| kp.peer_id())
     }
 
     /// Returns `true` if TLS is configured (required for listening).
     pub fn can_listen(&self) -> bool {
-        self.local_cert_chain_path.is_some() && self.local_priv_key_path.is_some()
+        self.keypair.is_some()
     }
 
-    /// Returns the TLS certificate chain PEM path, if configured.
-    pub(crate) fn local_cert_chain_path(&self) -> Option<&str> {
-        self.local_cert_chain_path.as_deref()
-    }
-
-    /// Returns the TLS private key PEM path, if configured.
-    pub(crate) fn local_priv_key_path(&self) -> Option<&str> {
-        self.local_priv_key_path.as_deref()
-    }
-
-    /// Returns whether peer certificate verification is enabled.
-    pub(crate) fn peer_verification(&self) -> bool {
-        self.peer_verification
+    /// Returns the Ed25519 host keypair, if configured.
+    pub(crate) fn keypair(&self) -> Option<&Ed25519Keypair> {
+        self.keypair.as_ref()
     }
 }
