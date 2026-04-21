@@ -119,6 +119,22 @@ impl MultistreamSelect {
         ))]
     }
 
+    /// Returns `true` if negotiation has completed (successfully or with an error).
+    pub fn is_done(&self) -> bool {
+        self.state == State::Done
+    }
+
+    /// Drains and returns any buffered bytes received after negotiation finished.
+    ///
+    /// If the remote pipelines protocol data into the same network packet that
+    /// completes the multistream-select handshake, those extra bytes remain in
+    /// the internal receive buffer. After detecting [`MultistreamOutput::Negotiated`],
+    /// callers should drain these bytes and hand them to the negotiated
+    /// protocol handler.
+    pub fn take_remaining_buffer(&mut self) -> Vec<u8> {
+        core::mem::take(&mut self.recv_buf)
+    }
+
     /// Feeds received bytes into the state machine and returns any outputs.
     pub fn receive(&mut self, bytes: &[u8]) -> Vec<MultistreamOutput> {
         if self.state == State::Done {
