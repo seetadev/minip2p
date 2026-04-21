@@ -1,9 +1,8 @@
 use alloc::string::String;
 
-use minip2p_core::PeerId;
 use thiserror::Error;
 
-use crate::ConnectionId;
+use crate::{ConnectionId, StreamId};
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum TransportError {
@@ -16,8 +15,6 @@ pub enum TransportError {
     InvalidConfig { reason: String },
     #[error("resource exhausted: {resource}")]
     ResourceExhausted { resource: &'static str },
-    #[error("peer {peer_id} has no connected transport connections")]
-    PeerNotConnected { peer_id: PeerId },
     #[error("connection {id} not found")]
     ConnectionNotFound { id: ConnectionId },
     #[error("connection {id} already exists")]
@@ -34,8 +31,36 @@ pub enum TransportError {
     ListenFailed { reason: String },
     #[error("dial failed for {id}: {reason}")]
     DialFailed { id: ConnectionId, reason: String },
-    #[error("send failed for {id}: {reason}")]
-    SendFailed { id: ConnectionId, reason: String },
+    #[error("stream {stream_id} not found on connection {id}")]
+    StreamNotFound {
+        id: ConnectionId,
+        stream_id: StreamId,
+    },
+    #[error("stream {stream_id} already exists on connection {id}")]
+    StreamExists {
+        id: ConnectionId,
+        stream_id: StreamId,
+    },
+    #[error("failed to open stream on {id}: {reason}")]
+    OpenStreamFailed { id: ConnectionId, reason: String },
+    #[error("stream send failed for {id}/{stream_id}: {reason}")]
+    StreamSendFailed {
+        id: ConnectionId,
+        stream_id: StreamId,
+        reason: String,
+    },
+    #[error("stream close write failed for {id}/{stream_id}: {reason}")]
+    StreamCloseWriteFailed {
+        id: ConnectionId,
+        stream_id: StreamId,
+        reason: String,
+    },
+    #[error("stream reset failed for {id}/{stream_id}: {reason}")]
+    StreamResetFailed {
+        id: ConnectionId,
+        stream_id: StreamId,
+        reason: String,
+    },
     #[error("close failed for {id}: {reason}")]
     CloseFailed { id: ConnectionId, reason: String },
     #[error("poll error: {reason}")]

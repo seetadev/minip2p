@@ -1,0 +1,523 @@
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use minip2p_core::PeerId;
+use minip2p_transport::StreamId;
+use thiserror::Error;
+
+pub const PING_PROTOCOL_ID: &str = "/ipfs/ping/1.0.0";
+pub const PING_PAYLOAD_LEN: usize = 32;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PingConfig {
+    pub request_timeout_ms: u64,
+}
+
+impl Default for PingConfig {
+    fn default() -> Self {
+        Self {
+            request_timeout_ms: 10_000,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PingAction {
+    Send {
+        peer_id: PeerId,
+        stream_id: StreamId,
+        data: [u8; PING_PAYLOAD_LEN],
+    },
+    CloseStreamWrite {
+        peer_id: PeerId,
+        stream_id: StreamId,
+    },
+    ResetStream {
+        peer_id: PeerId,
+        stream_id: StreamId,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PingEvent {
+    OutboundStreamRegistered {
+        peer_id: PeerId,
+        stream_id: StreamId,
+    },
+    InboundStreamAccepted {
+        peer_id: PeerId,
+        stream_id: StreamId,
+    },
+    RttMeasured {
+        peer_id: PeerId,
+        stream_id: StreamId,
+        rtt_ms: u64,
+    },
+    Timeout {
+        peer_id: PeerId,
+        stream_id: StreamId,
+        timeout_ms: u64,
+    },
+    StreamLimitExceeded {
+        peer_id: PeerId,
+        stream_id: StreamId,
+        limit: usize,
+    },
+    ProtocolViolation {
+        peer_id: PeerId,
+        stream_id: StreamId,
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum PingError {
+    #[error("peer {peer_id} already has outbound ping stream {existing_stream}")]
+    OutboundStreamExists {
+        peer_id: PeerId,
+        existing_stream: StreamId,
+    },
+    #[error("peer {peer_id} has no outbound ping stream")]
+    OutboundStreamMissing { peer_id: PeerId },
+    #[error("peer {peer_id} already has ping request in flight on stream {stream_id}")]
+    PingAlreadyInFlight {
+        peer_id: PeerId,
+        stream_id: StreamId,
+    },
+    #[error("invalid ping payload length {actual}; expected {PING_PAYLOAD_LEN}")]
+    InvalidPayloadLength { actual: usize },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingPing {
+    payload: [u8; PING_PAYLOAD_LEN],
+    sent_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct PeerPingState {
+    outbound_stream: Option<StreamId>,
+    inbound_streams: BTreeSet<StreamId>,
+    pending_ping: Option<PendingPing>,
+}
+
+pub struct PingProtocol {
+    peers: BTreeMap<PeerId, PeerPingState>,
+    pending_events: Vec<PingEvent>,
+    config: PingConfig,
+}
+
+impl Default for PingProtocol {
+    fn default() -> Self {
+        Self::new(PingConfig::default())
+    }
+}
+
+impl PingProtocol {
+    pub fn new(config: PingConfig) -> Self {
+        Self {
+            peers: BTreeMap::new(),
+            pending_events: Vec::new(),
+            config,
+        }
+    }
+
+    pub fn register_outbound_stream(
+        &mut self,
+        peer_id: PeerId,
+        stream_id: StreamId,
+    ) -> Result<(), PingError> {
+        let peer = self.peers.entry(peer_id.clone()).or_default();
+
+        if let Some(existing) = peer.outbound_stream {
+            if existing != stream_id {
+                return Err(PingError::OutboundStreamExists {
+                    peer_id,
+                    existing_stream: existing,
+                });
+            }
+
+            return Ok(());
+        }
+
+        peer.outbound_stream = Some(stream_id);
+        self.pending_events
+            .push(PingEvent::OutboundStreamRegistered { peer_id, stream_id });
+        Ok(())
+    }
+
+    pub fn register_inbound_stream(
+        &mut self,
+        peer_id: PeerId,
+        stream_id: StreamId,
+    ) -> Vec<PingAction> {
+        let peer = self.peers.entry(peer_id.clone()).or_default();
+        if peer.inbound_streams.contains(&stream_id) {
+            return Vec::new();
+        }
+
+        if peer.inbound_streams.len() >= 2 {
+            self.pending_events.push(PingEvent::StreamLimitExceeded {
+                peer_id: peer_id.clone(),
+                stream_id,
+                limit: 2,
+            });
+
+            return vec![PingAction::ResetStream { peer_id, stream_id }];
+        }
+
+        peer.inbound_streams.insert(stream_id);
+        self.pending_events
+            .push(PingEvent::InboundStreamAccepted { peer_id, stream_id });
+        Vec::new()
+    }
+
+    pub fn send_ping(
+        &mut self,
+        peer_id: &PeerId,
+        payload: &[u8],
+        now_ms: u64,
+    ) -> Result<PingAction, PingError> {
+        if payload.len() != PING_PAYLOAD_LEN {
+            return Err(PingError::InvalidPayloadLength {
+                actual: payload.len(),
+            });
+        }
+
+        let peer = self.peers.entry(peer_id.clone()).or_default();
+        let stream_id = peer
+            .outbound_stream
+            .ok_or_else(|| PingError::OutboundStreamMissing {
+                peer_id: peer_id.clone(),
+            })?;
+
+        if peer.pending_ping.is_some() {
+            return Err(PingError::PingAlreadyInFlight {
+                peer_id: peer_id.clone(),
+                stream_id,
+            });
+        }
+
+        let mut frame = [0u8; PING_PAYLOAD_LEN];
+        frame.copy_from_slice(payload);
+        peer.pending_ping = Some(PendingPing {
+            payload: frame,
+            sent_at_ms: now_ms,
+        });
+
+        Ok(PingAction::Send {
+            peer_id: peer_id.clone(),
+            stream_id,
+            data: frame,
+        })
+    }
+
+    pub fn close_outbound_stream_write(
+        &mut self,
+        peer_id: &PeerId,
+    ) -> Result<PingAction, PingError> {
+        let peer = self.peers.entry(peer_id.clone()).or_default();
+        let stream_id = peer
+            .outbound_stream
+            .ok_or_else(|| PingError::OutboundStreamMissing {
+                peer_id: peer_id.clone(),
+            })?;
+
+        Ok(PingAction::CloseStreamWrite {
+            peer_id: peer_id.clone(),
+            stream_id,
+        })
+    }
+
+    pub fn on_stream_data(
+        &mut self,
+        peer_id: &PeerId,
+        stream_id: StreamId,
+        data: &[u8],
+        now_ms: u64,
+    ) -> Vec<PingAction> {
+        if data.len() != PING_PAYLOAD_LEN {
+            return self.protocol_violation(
+                peer_id,
+                stream_id,
+                format!(
+                    "payload length {} does not match required {}",
+                    data.len(),
+                    PING_PAYLOAD_LEN
+                ),
+            );
+        }
+
+        let peer = self.peers.entry(peer_id.clone()).or_default();
+
+        if peer.outbound_stream == Some(stream_id) {
+            let Some(pending) = peer.pending_ping.take() else {
+                return self.protocol_violation(
+                    peer_id,
+                    stream_id,
+                    "received ping response with no in-flight request".into(),
+                );
+            };
+
+            if pending.payload.as_slice() != data {
+                return self.protocol_violation(
+                    peer_id,
+                    stream_id,
+                    "ping response payload mismatch".into(),
+                );
+            }
+
+            let rtt_ms = now_ms.saturating_sub(pending.sent_at_ms);
+            self.pending_events.push(PingEvent::RttMeasured {
+                peer_id: peer_id.clone(),
+                stream_id,
+                rtt_ms,
+            });
+            return Vec::new();
+        }
+
+        if peer.inbound_streams.contains(&stream_id) {
+            let mut out = [0u8; PING_PAYLOAD_LEN];
+            out.copy_from_slice(data);
+
+            return vec![PingAction::Send {
+                peer_id: peer_id.clone(),
+                stream_id,
+                data: out,
+            }];
+        }
+
+        self.protocol_violation(peer_id, stream_id, "ping data on unknown stream".into())
+    }
+
+    pub fn on_stream_remote_write_closed(
+        &mut self,
+        peer_id: &PeerId,
+        stream_id: StreamId,
+    ) -> Vec<PingAction> {
+        let peer = self.peers.entry(peer_id.clone()).or_default();
+
+        if peer.inbound_streams.remove(&stream_id) {
+            return Vec::new();
+        }
+
+        if peer.outbound_stream == Some(stream_id) {
+            if peer.pending_ping.is_some() {
+                return self.protocol_violation(
+                    peer_id,
+                    stream_id,
+                    "outbound stream closed before ping response".into(),
+                );
+            }
+
+            peer.outbound_stream = None;
+            return Vec::new();
+        }
+
+        Vec::new()
+    }
+
+    pub fn on_stream_closed(&mut self, peer_id: &PeerId, stream_id: StreamId) {
+        let Some(peer) = self.peers.get_mut(peer_id) else {
+            return;
+        };
+
+        peer.inbound_streams.remove(&stream_id);
+        if peer.outbound_stream == Some(stream_id) {
+            peer.outbound_stream = None;
+            peer.pending_ping = None;
+        }
+    }
+
+    pub fn on_tick(&mut self, now_ms: u64) -> Vec<PingAction> {
+        let mut actions = Vec::new();
+
+        for (peer_id, peer) in self.peers.iter_mut() {
+            let Some(stream_id) = peer.outbound_stream else {
+                continue;
+            };
+            let Some(pending) = peer.pending_ping.as_ref() else {
+                continue;
+            };
+
+            let elapsed = now_ms.saturating_sub(pending.sent_at_ms);
+            if elapsed > self.config.request_timeout_ms {
+                peer.pending_ping = None;
+                peer.outbound_stream = None;
+                self.pending_events.push(PingEvent::Timeout {
+                    peer_id: peer_id.clone(),
+                    stream_id,
+                    timeout_ms: self.config.request_timeout_ms,
+                });
+                actions.push(PingAction::ResetStream {
+                    peer_id: peer_id.clone(),
+                    stream_id,
+                });
+            }
+        }
+
+        actions
+    }
+
+    pub fn poll_events(&mut self) -> Vec<PingEvent> {
+        core::mem::take(&mut self.pending_events)
+    }
+
+    fn protocol_violation(
+        &mut self,
+        peer_id: &PeerId,
+        stream_id: StreamId,
+        reason: String,
+    ) -> Vec<PingAction> {
+        self.pending_events.push(PingEvent::ProtocolViolation {
+            peer_id: peer_id.clone(),
+            stream_id,
+            reason,
+        });
+
+        vec![PingAction::ResetStream {
+            peer_id: peer_id.clone(),
+            stream_id,
+        }]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::str::FromStr;
+
+    use super::*;
+
+    fn peer(id: &str) -> PeerId {
+        PeerId::from_str(id).expect("peer id")
+    }
+
+    fn test_peer() -> PeerId {
+        peer("QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N")
+    }
+
+    #[test]
+    fn outbound_ping_roundtrip_emits_rtt() {
+        let mut ping = PingProtocol::default();
+        let peer = test_peer();
+        let stream = StreamId::new(0);
+
+        ping.register_outbound_stream(peer.clone(), stream)
+            .expect("register stream");
+
+        let payload = [42u8; PING_PAYLOAD_LEN];
+        let send = ping
+            .send_ping(&peer, &payload, 100)
+            .expect("send ping action");
+        assert!(matches!(
+            send,
+            PingAction::Send {
+                stream_id,
+                data,
+                ..
+            } if stream_id == stream && data == payload
+        ));
+
+        let response_actions = ping.on_stream_data(&peer, stream, &payload, 135);
+        assert!(response_actions.is_empty());
+
+        let events = ping.poll_events();
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                PingEvent::RttMeasured {
+                    peer_id,
+                    stream_id,
+                    rtt_ms
+                } if peer_id == &peer && *stream_id == stream && *rtt_ms == 35
+            )
+        }));
+    }
+
+    #[test]
+    fn inbound_stream_limit_is_enforced() {
+        let mut ping = PingProtocol::default();
+        let peer = test_peer();
+
+        let a = ping.register_inbound_stream(peer.clone(), StreamId::new(1));
+        let b = ping.register_inbound_stream(peer.clone(), StreamId::new(5));
+        let c = ping.register_inbound_stream(peer.clone(), StreamId::new(9));
+
+        assert!(a.is_empty());
+        assert!(b.is_empty());
+        assert_eq!(
+            c,
+            vec![PingAction::ResetStream {
+                peer_id: peer.clone(),
+                stream_id: StreamId::new(9),
+            }]
+        );
+
+        let events = ping.poll_events();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, PingEvent::StreamLimitExceeded { .. }))
+        );
+    }
+
+    #[test]
+    fn inbound_payload_is_echoed() {
+        let mut ping = PingProtocol::default();
+        let peer = test_peer();
+        let stream = StreamId::new(3);
+
+        let _ = ping.register_inbound_stream(peer.clone(), stream);
+
+        let payload = [7u8; PING_PAYLOAD_LEN];
+        let out = ping.on_stream_data(&peer, stream, &payload, 5);
+        assert_eq!(
+            out,
+            vec![PingAction::Send {
+                peer_id: peer,
+                stream_id: stream,
+                data: payload,
+            }]
+        );
+    }
+
+    #[test]
+    fn timeout_emits_event_and_reset_action() {
+        let mut ping = PingProtocol::new(PingConfig {
+            request_timeout_ms: 10,
+        });
+        let peer = test_peer();
+        let stream = StreamId::new(0);
+
+        ping.register_outbound_stream(peer.clone(), stream)
+            .expect("register stream");
+        let payload = [1u8; PING_PAYLOAD_LEN];
+        let _ = ping.send_ping(&peer, &payload, 100).expect("send ping");
+
+        let actions = ping.on_tick(111);
+        assert_eq!(
+            actions,
+            vec![PingAction::ResetStream {
+                peer_id: peer.clone(),
+                stream_id: stream,
+            }]
+        );
+
+        let events = ping.poll_events();
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                PingEvent::Timeout {
+                    peer_id,
+                    stream_id,
+                    timeout_ms
+                } if peer_id == &peer && *stream_id == stream && *timeout_ms == 10
+            )
+        }));
+    }
+}

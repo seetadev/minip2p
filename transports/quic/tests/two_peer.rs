@@ -1,11 +1,10 @@
-use std::collections::BTreeSet;
 use std::io::Write;
 use std::str::FromStr;
 
 use minip2p_core::{Multiaddr, PeerAddr, Protocol};
 use minip2p_identity::PeerId;
 use minip2p_quic::{QuicNodeConfig, QuicTransport};
-use minip2p_transport::{ConnectionId, PeerSendPolicy, Transport, TransportError, TransportEvent};
+use minip2p_transport::{ConnectionId, StreamId, Transport, TransportError, TransportEvent};
 use tempfile::TempDir;
 
 fn generate_cert_pair() -> (TempDir, String, String) {
@@ -54,7 +53,6 @@ fn setup_pair() -> (QuicTransport, QuicTransport, PeerAddr, TempDir) {
     let (cert_dir, cert_path, key_path) = generate_cert_pair();
 
     let listener_node_config = QuicNodeConfig::dev_listener_with_tls(&cert_path, &key_path);
-
     let dialer_node_config = QuicNodeConfig::dev_dialer();
 
     let mut server = QuicTransport::new(listener_node_config, "127.0.0.1:0").expect("server bind");
@@ -80,30 +78,53 @@ fn drive_pair_once(
     (server_events, client_events)
 }
 
-fn wait_for_client_connection(
+fn wait_for_connection(
     server: &mut QuicTransport,
     client: &mut QuicTransport,
-    expected: ConnectionId,
-    peer_addr: &PeerAddr,
+    expected_client_conn: ConnectionId,
+    expected_peer: &PeerAddr,
     max_iters: usize,
-) -> bool {
+) -> Option<ConnectionId> {
+    let mut server_conn = None;
+    let mut client_connected = false;
+
     for _ in 0..max_iters {
-        let (_, client_events) = drive_pair_once(server, client);
+        let (server_events, client_events) = drive_pair_once(server, client);
+
+        for event in server_events {
+            match event {
+                TransportEvent::IncomingConnection { id, endpoint } => {
+                    assert!(endpoint.peer_id().is_none());
+                    server_conn = Some(id);
+                }
+                TransportEvent::Connected { id, .. } => {
+                    if server_conn.is_none() {
+                        server_conn = Some(id);
+                    }
+                }
+                _ => {}
+            }
+        }
+
         for event in client_events {
             if let TransportEvent::Connected { id, endpoint } = event {
-                if id == expected {
-                    assert_eq!(endpoint.peer_id(), Some(peer_addr.peer_id()));
-                    return true;
+                if id == expected_client_conn {
+                    assert_eq!(endpoint.peer_id(), Some(expected_peer.peer_id()));
+                    client_connected = true;
                 }
             }
         }
+
+        if client_connected && server_conn.is_some() {
+            return server_conn;
+        }
     }
 
-    false
+    None
 }
 
 #[test]
-fn two_peers_connect_and_exchange_data() {
+fn two_peers_open_stream_and_exchange_data() {
     let (mut server, mut client, peer_addr, _cert_dir) = setup_pair();
 
     let client_conn_id = ConnectionId::new(1);
@@ -111,210 +132,142 @@ fn two_peers_connect_and_exchange_data() {
         .dial(client_conn_id, &peer_addr)
         .expect("client dial");
 
-    let mut server_got_connection = false;
-    let mut client_got_connected = false;
-    let mut server_received = false;
-    let mut client_received = false;
+    let server_conn_id =
+        wait_for_connection(&mut server, &mut client, client_conn_id, &peer_addr, 250)
+            .expect("server should observe incoming connection");
 
-    let mut server_conn_id = ConnectionId::new(0);
-
-    for _ in 0..200 {
-        std::thread::sleep(std::time::Duration::from_millis(5));
-
-        let server_events = server.poll().expect("server poll");
-        for event in &server_events {
-            match event {
-                TransportEvent::IncomingConnection { id, endpoint } => {
-                    server_got_connection = true;
-                    server_conn_id = *id;
-                    assert!(endpoint.peer_id().is_none());
-                }
-                TransportEvent::Connected { id, .. } => {
-                    if !server_got_connection {
-                        server_got_connection = true;
-                        server_conn_id = *id;
-                    }
-                }
-                TransportEvent::Received { data, .. } => {
-                    assert_eq!(data, b"hello from client");
-                    server_received = true;
-                }
-                _ => {}
-            }
-        }
-
-        let client_events = client.poll().expect("client poll");
-        for event in &client_events {
-            match event {
-                TransportEvent::Connected { endpoint, .. } => {
-                    assert_eq!(endpoint.peer_id(), Some(peer_addr.peer_id()));
-                    client_got_connected = true;
-                }
-                TransportEvent::Received { data, .. } => {
-                    assert_eq!(data, b"hello from server");
-                    client_received = true;
-                }
-                _ => {}
-            }
-        }
-
-        if client_got_connected && server_got_connection {
-            break;
-        }
-    }
-
-    assert!(
-        server_got_connection,
-        "server should see incoming connection"
-    );
-    assert!(client_got_connected, "client should be connected");
-
+    let client_stream = client.open_stream(client_conn_id).expect("open stream");
     client
-        .send(client_conn_id, b"hello from client".to_vec())
-        .expect("client send");
+        .send_stream(client_conn_id, client_stream, b"hello from client".to_vec())
+        .expect("send stream data");
 
-    for _ in 0..200 {
-        std::thread::sleep(std::time::Duration::from_millis(5));
-
-        let server_events = server.poll().expect("server poll");
-        for event in &server_events {
-            if let TransportEvent::Received { data, .. } = event {
-                assert_eq!(data, b"hello from client");
-                server_received = true;
+    let mut server_stream = None;
+    for _ in 0..250 {
+        let (server_events, client_events) = drive_pair_once(&mut server, &mut client);
+        for event in client_events {
+            if let TransportEvent::StreamOpened { id, stream_id } = event {
+                if id == client_conn_id {
+                    assert_eq!(stream_id, client_stream);
+                }
             }
         }
 
-        if server_received {
+        for event in server_events {
+            match event {
+                TransportEvent::IncomingStream { id, stream_id } => {
+                    assert_eq!(id, server_conn_id);
+                    server_stream = Some(stream_id);
+                }
+                TransportEvent::StreamData {
+                    id,
+                    stream_id,
+                    data,
+                } => {
+                    assert_eq!(id, server_conn_id);
+                    assert_eq!(data, b"hello from client");
+                    server_stream = Some(stream_id);
+                }
+                _ => {}
+            }
+        }
+
+        if server_stream.is_some() {
             break;
         }
     }
 
-    assert!(server_received, "server should receive client data");
-
+    let server_stream = server_stream.expect("server should see stream and data");
     server
-        .send(server_conn_id, b"hello from server".to_vec())
-        .expect("server send");
+        .send_stream(server_conn_id, server_stream, b"hello from server".to_vec())
+        .expect("server response");
 
-    for _ in 0..200 {
-        std::thread::sleep(std::time::Duration::from_millis(5));
-
-        let client_events = client.poll().expect("client poll");
-        for event in &client_events {
-            if let TransportEvent::Received { data, .. } = event {
-                assert_eq!(data, b"hello from server");
-                client_received = true;
+    for _ in 0..250 {
+        let (_, client_events) = drive_pair_once(&mut server, &mut client);
+        for event in client_events {
+            if let TransportEvent::StreamData {
+                id,
+                stream_id,
+                data,
+            } = event
+            {
+                if id == client_conn_id && stream_id == client_stream {
+                    assert_eq!(data, b"hello from server");
+                    return;
+                }
             }
-        }
-
-        if client_received {
-            break;
         }
     }
 
-    assert!(client_received, "client should receive server data");
+    panic!("client did not receive server stream data in time");
 }
 
 #[test]
-fn same_peer_supports_multiple_connections() {
+fn close_stream_write_emits_remote_write_closed() {
     let (mut server, mut client, peer_addr, _cert_dir) = setup_pair();
 
-    let conn_a = ConnectionId::new(10);
-    let conn_b = ConnectionId::new(11);
+    let client_conn_id = ConnectionId::new(5);
+    client.dial(client_conn_id, &peer_addr).expect("dial");
 
-    client.dial(conn_a, &peer_addr).expect("dial conn_a");
-    client.dial(conn_b, &peer_addr).expect("dial conn_b");
+    let server_conn_id =
+        wait_for_connection(&mut server, &mut client, client_conn_id, &peer_addr, 250)
+            .expect("server connection");
 
-    let mut client_connected = BTreeSet::new();
-    let mut server_connection_ids = BTreeSet::new();
+    let client_stream = client.open_stream(client_conn_id).expect("open stream");
+    client
+        .send_stream(client_conn_id, client_stream, b"payload".to_vec())
+        .expect("send payload");
+    client
+        .close_stream_write(client_conn_id, client_stream)
+        .expect("close write");
 
-    for _ in 0..400 {
-        std::thread::sleep(std::time::Duration::from_millis(5));
+    let mut server_saw_remote_write_closed = false;
+    let mut server_stream = None;
 
-        let server_events = server.poll().expect("server poll");
+    for _ in 0..250 {
+        let (server_events, _) = drive_pair_once(&mut server, &mut client);
         for event in server_events {
             match event {
-                TransportEvent::IncomingConnection { id, endpoint } => {
-                    assert!(endpoint.peer_id().is_none());
-                    server_connection_ids.insert(id);
+                TransportEvent::IncomingStream { stream_id, .. } => {
+                    server_stream = Some(stream_id);
                 }
-                TransportEvent::Connected { id, .. } => {
-                    server_connection_ids.insert(id);
+                TransportEvent::StreamRemoteWriteClosed { id, stream_id } => {
+                    assert_eq!(id, server_conn_id);
+                    server_stream = Some(stream_id);
+                    server_saw_remote_write_closed = true;
                 }
                 _ => {}
             }
         }
 
-        let client_events = client.poll().expect("client poll");
-        for event in client_events {
-            if let TransportEvent::Connected { id, endpoint } = event {
-                assert_eq!(endpoint.peer_id(), Some(peer_addr.peer_id()));
-                client_connected.insert(id);
-            }
-        }
-
-        if client_connected.len() == 2 && server_connection_ids.len() >= 2 {
+        if server_saw_remote_write_closed {
             break;
         }
     }
 
-    assert_eq!(client_connected.len(), 2, "client should connect twice");
     assert!(
-        server_connection_ids.len() >= 2,
-        "server should track two incoming connections"
+        server_saw_remote_write_closed,
+        "server should observe remote write close"
     );
 
-    let known = client.connection_ids_for_peer(peer_addr.peer_id());
-    assert_eq!(known, vec![conn_a, conn_b]);
-    assert_eq!(
-        client.primary_connection_for_peer(peer_addr.peer_id()),
-        Some(conn_a)
-    );
+    let server_stream = server_stream.expect("server stream id should be known");
+    server
+        .close_stream_write(server_conn_id, server_stream)
+        .expect("server close write");
 
-    let used_primary = client
-        .send_to_peer(
-            peer_addr.peer_id(),
-            b"msg-a".to_vec(),
-            PeerSendPolicy::Primary,
-        )
-        .expect("send primary");
-    let used_newest = client
-        .send_to_peer(
-            peer_addr.peer_id(),
-            b"msg-b".to_vec(),
-            PeerSendPolicy::NewestConnected,
-        )
-        .expect("send newest");
-
-    assert_eq!(used_primary, conn_a);
-    assert_eq!(used_newest, conn_b);
-
-    let mut got_a = false;
-    let mut got_b = false;
-
-    for _ in 0..400 {
-        std::thread::sleep(std::time::Duration::from_millis(5));
-
-        let server_events = server.poll().expect("server poll");
-        for event in server_events {
-            if let TransportEvent::Received { data, .. } = event {
-                if data == b"msg-a" {
-                    got_a = true;
-                }
-                if data == b"msg-b" {
-                    got_b = true;
-                }
-            }
-        }
-
-        let _ = client.poll().expect("client poll");
-
-        if got_a && got_b {
-            break;
+    for _ in 0..250 {
+        let (_, client_events) = drive_pair_once(&mut server, &mut client);
+        if client_events.iter().any(|event| {
+            matches!(
+                event,
+                TransportEvent::StreamRemoteWriteClosed { id, stream_id }
+                if *id == client_conn_id && *stream_id == client_stream
+            )
+        }) {
+            return;
         }
     }
 
-    assert!(got_a, "server should receive message on conn_a");
-    assert!(got_b, "server should receive message on conn_b");
+    panic!("client should observe server close stream write");
 }
 
 #[test]
@@ -348,38 +301,9 @@ fn identity_upgrade_emits_verified_event_and_updates_peer_index() {
         .dial(client_conn_id, &peer_addr)
         .expect("client dial");
 
-    let mut server_conn_id = None;
-    let mut client_connected = false;
-
-    for _ in 0..200 {
-        std::thread::sleep(std::time::Duration::from_millis(5));
-
-        for event in server.poll().expect("server poll") {
-            match event {
-                TransportEvent::IncomingConnection { id, endpoint } => {
-                    assert!(endpoint.peer_id().is_none());
-                    server_conn_id = Some(id);
-                }
-                TransportEvent::Connected { id, .. } => {
-                    server_conn_id = Some(id);
-                }
-                _ => {}
-            }
-        }
-
-        for event in client.poll().expect("client poll") {
-            if let TransportEvent::Connected { .. } = event {
-                client_connected = true;
-            }
-        }
-
-        if server_conn_id.is_some() && client_connected {
-            break;
-        }
-    }
-
-    let server_conn_id = server_conn_id.expect("server connection id");
-    assert!(client_connected, "client should be connected");
+    let server_conn_id =
+        wait_for_connection(&mut server, &mut client, client_conn_id, &peer_addr, 250)
+            .expect("server connection");
 
     let verified_peer_id = test_peer_id();
     server
@@ -431,9 +355,8 @@ fn dial_supports_dns4_target_for_quic_transport() {
     let conn_id = ConnectionId::new(77);
     client.dial(conn_id, &dns_peer_addr).expect("dial via dns4");
 
-    let connected =
-        wait_for_client_connection(&mut server, &mut client, conn_id, &dns_peer_addr, 200);
-    assert!(connected, "client should connect via dns4 target");
+    let connected = wait_for_connection(&mut server, &mut client, conn_id, &dns_peer_addr, 250);
+    assert!(connected.is_some(), "client should connect via dns4 target");
 }
 
 #[test]
@@ -472,87 +395,30 @@ fn listen_rejects_address_mismatch_with_bound_socket() {
 }
 
 #[test]
-fn peer_send_policy_prefers_connection_age_over_connection_id_order() {
-    let (mut server, mut client, peer_addr, _cert_dir) = setup_pair();
+fn open_stream_before_connected_returns_invalid_state() {
+    let (_cert_dir, cert_path, key_path) = generate_cert_pair();
+    let listener_cfg = QuicNodeConfig::dev_listener_with_tls(&cert_path, &key_path);
+    let mut listener = QuicTransport::new(listener_cfg, "127.0.0.1:0").expect("listener");
 
-    let older_conn = ConnectionId::new(100);
-    let newer_conn = ConnectionId::new(1);
+    let listen_port = listener.local_addr().expect("local addr").port();
+    let listen_ma = make_listen_multiaddr(listen_port);
+    listener.listen(&listen_ma).expect("listen");
 
-    client
-        .dial(older_conn, &peer_addr)
-        .expect("dial older conn");
-    let older_connected =
-        wait_for_client_connection(&mut server, &mut client, older_conn, &peer_addr, 250);
-    assert!(older_connected, "older connection should establish");
+    let dialer_cfg = QuicNodeConfig::dev_dialer();
+    let mut dialer = QuicTransport::new(dialer_cfg, "127.0.0.1:0").expect("dialer");
 
-    client
-        .dial(newer_conn, &peer_addr)
-        .expect("dial newer conn");
-    let newer_connected =
-        wait_for_client_connection(&mut server, &mut client, newer_conn, &peer_addr, 250);
-    assert!(newer_connected, "newer connection should establish");
+    let peer_addr = PeerAddr::new(listen_ma, test_peer_id()).expect("peer addr");
+    let conn_id = ConnectionId::new(999);
+    dialer.dial(conn_id, &peer_addr).expect("dial");
 
-    let used_primary = client
-        .send_to_peer(
-            peer_addr.peer_id(),
-            b"primary-oldest".to_vec(),
-            PeerSendPolicy::Primary,
-        )
-        .expect("send with primary policy");
-    let used_oldest = client
-        .send_to_peer(
-            peer_addr.peer_id(),
-            b"explicit-oldest".to_vec(),
-            PeerSendPolicy::OldestConnected,
-        )
-        .expect("send with oldest policy");
-    let used_newest = client
-        .send_to_peer(
-            peer_addr.peer_id(),
-            b"newest".to_vec(),
-            PeerSendPolicy::NewestConnected,
-        )
-        .expect("send with newest policy");
-
-    assert_eq!(used_primary, older_conn);
-    assert_eq!(used_oldest, older_conn);
-    assert_eq!(used_newest, newer_conn);
+    let err = dialer
+        .open_stream(conn_id)
+        .expect_err("open stream before connected should fail");
+    assert!(matches!(err, TransportError::InvalidState { .. }));
 }
 
 #[test]
-fn large_payload_is_delivered_as_single_received_event() {
-    let (mut server, mut client, peer_addr, _cert_dir) = setup_pair();
-
-    let conn_id = ConnectionId::new(501);
-    client.dial(conn_id, &peer_addr).expect("dial");
-    let connected = wait_for_client_connection(&mut server, &mut client, conn_id, &peer_addr, 250);
-    assert!(connected, "client should connect");
-
-    let payload = vec![42u8; 32 * 1024];
-    client
-        .send(conn_id, payload.clone())
-        .expect("send large payload");
-
-    for _ in 0..250 {
-        let (server_events, _) = drive_pair_once(&mut server, &mut client);
-
-        let received: Vec<Vec<u8>> = server_events
-            .into_iter()
-            .filter_map(|event| {
-                if let TransportEvent::Received { data, .. } = event {
-                    Some(data)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if !received.is_empty() {
-            assert_eq!(received.len(), 1, "payload should arrive as one message");
-            assert_eq!(received[0], payload, "payload bytes should be preserved");
-            return;
-        }
-    }
-
-    panic!("server did not receive large payload in time");
+fn stream_id_round_trips_as_u64() {
+    let id = StreamId::new(1234);
+    assert_eq!(id.as_u64(), 1234);
 }

@@ -15,14 +15,16 @@ Current crates:
 
 - `packages/identity` (`minip2p-identity`): peer identity primitives and validation.
 - `packages/core` (`minip2p-core`): transport-agnostic address/types (`Multiaddr`, `PeerAddr`, `PeerId` re-export).
-- `packages/transport` (`minip2p-transport`): transport contract types, connection lifecycle, events, and errors.
+- `packages/transport` (`minip2p-transport`): transport contract types, connection+stream lifecycle, events, and errors.
+- `packages/multistream-select` (`minip2p-multistream-select`): Sans-I/O protocol negotiation state machine (`/multistream/1.0.0`).
+- `packages/ping` (`minip2p-ping`): Sans-I/O ping protocol state machine (`/ipfs/ping/1.0.0`).
 - `transports/quic` (`minip2p-quic`): `std` QUIC transport adapter built on `quiche`.
 
 Current validated behavior:
 
 - Two local peers connect over QUIC in integration tests.
-- Peers exchange bytes bidirectionally.
-- Multiple simultaneous connections per peer are supported.
+- Peers open QUIC streams and exchange stream data bidirectionally.
+- Stream half-close (close write) propagates as transport events.
 - Identity upgrade events are emitted and peer indexing updates correctly.
 
 ## Architecture boundaries

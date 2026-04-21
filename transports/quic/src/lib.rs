@@ -3,8 +3,7 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
 
 use minip2p_core::{Multiaddr, PeerAddr, PeerId, Protocol};
 use minip2p_transport::{
-    ConnectionEndpoint, ConnectionId, ConnectionState, PeerSendPolicy, Transport, TransportError,
-    TransportEvent,
+    ConnectionEndpoint, ConnectionId, StreamId, Transport, TransportError, TransportEvent,
 };
 use quiche::ConnectionId as QuicConnectionId;
 
@@ -178,11 +177,9 @@ pub struct QuicTransport {
     connections: HashMap<ConnectionId, QuicConnection>,
     cid_to_connection: HashMap<Vec<u8>, ConnectionId>,
     peer_connections: HashMap<PeerId, BTreeSet<ConnectionId>>,
-    connection_connected_seq: HashMap<ConnectionId, u64>,
     pending_events: Vec<TransportEvent>,
     listen_addr: Option<SocketAddr>,
     next_connection_id: u64,
-    next_connected_seq: u64,
     node_config: QuicNodeConfig,
 }
 
@@ -240,11 +237,9 @@ impl QuicTransport {
             connections: HashMap::new(),
             cid_to_connection: HashMap::new(),
             peer_connections: HashMap::new(),
-            connection_connected_seq: HashMap::new(),
             pending_events: Vec::new(),
             listen_addr: None,
             next_connection_id: 1,
-            next_connected_seq: 1,
             node_config,
         })
     }
@@ -268,10 +263,6 @@ impl QuicTransport {
             .get(peer_id)
             .map(|ids| ids.iter().copied().collect())
             .unwrap_or_default()
-    }
-
-    pub fn primary_connection_for_peer(&self, peer_id: &PeerId) -> Option<ConnectionId> {
-        self.select_connection_for_peer(peer_id, PeerSendPolicy::Primary)
     }
 
     pub fn verify_connection_peer_id(
@@ -309,22 +300,6 @@ impl QuicTransport {
         Ok(())
     }
 
-    pub fn send_to_peer(
-        &mut self,
-        peer_id: &PeerId,
-        data: Vec<u8>,
-        policy: PeerSendPolicy,
-    ) -> Result<ConnectionId, TransportError> {
-        let connection_id = self
-            .select_connection_for_peer(peer_id, policy)
-            .ok_or_else(|| TransportError::PeerNotConnected {
-                peer_id: peer_id.clone(),
-            })?;
-
-        self.send(connection_id, data)?;
-        Ok(connection_id)
-    }
-
     fn allocate_connection_id(&mut self) -> Result<ConnectionId, TransportError> {
         let start = self.next_connection_id;
 
@@ -359,16 +334,6 @@ impl QuicTransport {
         self.peer_connections.entry(peer_id).or_default().insert(id);
     }
 
-    fn note_connection_established(&mut self, id: ConnectionId) {
-        if self.connection_connected_seq.contains_key(&id) {
-            return;
-        }
-
-        let seq = self.next_connected_seq;
-        self.next_connected_seq = self.next_connected_seq.wrapping_add(1);
-        self.connection_connected_seq.insert(id, seq);
-    }
-
     fn remove_peer_connection(&mut self, peer_id: &PeerId, id: ConnectionId) {
         let mut remove_entry = false;
 
@@ -382,41 +347,8 @@ impl QuicTransport {
         }
     }
 
-    fn select_connection_for_peer(
-        &self,
-        peer_id: &PeerId,
-        policy: PeerSendPolicy,
-    ) -> Option<ConnectionId> {
-        let ids = self.peer_connections.get(peer_id)?;
-
-        let is_connected = |id: &ConnectionId| {
-            self.connections
-                .get(id)
-                .is_some_and(QuicConnection::is_connected)
-        };
-
-        match policy {
-            PeerSendPolicy::Primary | PeerSendPolicy::OldestConnected => ids
-                .iter()
-                .filter(|id| is_connected(id))
-                .min_by_key(|id| {
-                    self.connection_connected_seq
-                        .get(id)
-                        .copied()
-                        .unwrap_or(u64::MAX)
-                })
-                .copied(),
-            PeerSendPolicy::NewestConnected => ids
-                .iter()
-                .filter(|id| is_connected(id))
-                .max_by_key(|id| self.connection_connected_seq.get(id).copied().unwrap_or(0))
-                .copied(),
-        }
-    }
-
     fn unindex_connection(&mut self, id: ConnectionId, peer_id: Option<PeerId>) {
         self.cid_to_connection.retain(|_, mapped| *mapped != id);
-        self.connection_connected_seq.remove(&id);
 
         if let Some(peer_id) = peer_id {
             self.remove_peer_connection(&peer_id, id);
@@ -509,21 +441,60 @@ impl Transport for QuicTransport {
         Ok(())
     }
 
-    fn send(&mut self, id: ConnectionId, data: Vec<u8>) -> Result<(), TransportError> {
+    fn open_stream(&mut self, id: ConnectionId) -> Result<StreamId, TransportError> {
         let conn = self
             .connections
             .get_mut(&id)
             .ok_or(TransportError::ConnectionNotFound { id })?;
 
-        if conn.state() != ConnectionState::Connected {
-            return Err(TransportError::InvalidState {
-                id,
-                state: conn.state(),
-                expected: ConnectionState::Connected,
-            });
-        }
+        let stream_id = conn.open_stream()?;
+        self.pending_events
+            .push(TransportEvent::StreamOpened { id, stream_id });
+        Ok(stream_id)
+    }
 
-        conn.send_data(&data, &self.socket)?;
+    fn send_stream(
+        &mut self,
+        id: ConnectionId,
+        stream_id: StreamId,
+        data: Vec<u8>,
+    ) -> Result<(), TransportError> {
+        let conn = self
+            .connections
+            .get_mut(&id)
+            .ok_or(TransportError::ConnectionNotFound { id })?;
+
+        conn.send_stream(stream_id, data, &self.socket, &mut self.pending_events)?;
+
+        Ok(())
+    }
+
+    fn close_stream_write(
+        &mut self,
+        id: ConnectionId,
+        stream_id: StreamId,
+    ) -> Result<(), TransportError> {
+        let conn = self
+            .connections
+            .get_mut(&id)
+            .ok_or(TransportError::ConnectionNotFound { id })?;
+
+        conn.close_stream_write(stream_id, &self.socket, &mut self.pending_events)?;
+
+        Ok(())
+    }
+
+    fn reset_stream(
+        &mut self,
+        id: ConnectionId,
+        stream_id: StreamId,
+    ) -> Result<(), TransportError> {
+        let conn = self
+            .connections
+            .get_mut(&id)
+            .ok_or(TransportError::ConnectionNotFound { id })?;
+
+        conn.reset_stream(stream_id, &mut self.pending_events)?;
 
         Ok(())
     }
@@ -542,7 +513,6 @@ impl Transport for QuicTransport {
     fn poll(&mut self) -> Result<Vec<TransportEvent>, TransportError> {
         let mut buf = [0u8; 65535];
         let mut events = std::mem::take(&mut self.pending_events);
-        let mut newly_connected_ids = Vec::new();
 
         loop {
             let (len, from) = match self.socket.recv_from(&mut buf) {
@@ -628,26 +598,15 @@ impl Transport for QuicTransport {
 
             if let Some(id) = target_conn_id {
                 let mut source_cid: Option<Vec<u8>> = None;
-                let mut became_connected = false;
                 if let Some(conn) = self.connections.get_mut(&id) {
-                    let was_connected = conn.is_connected();
                     conn.recv_packet(packet, from, local_addr, &self.socket, &mut events)?;
                     source_cid = Some(conn.source_cid_bytes());
-                    became_connected = !was_connected && conn.is_connected();
                 }
 
                 if let Some(source_cid) = source_cid {
                     self.cid_to_connection.insert(source_cid, id);
                 }
-
-                if became_connected {
-                    newly_connected_ids.push(id);
-                }
             }
-        }
-
-        for id in newly_connected_ids {
-            self.note_connection_established(id);
         }
 
         let mut to_remove = Vec::new();
