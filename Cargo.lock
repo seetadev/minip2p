@@ -596,6 +596,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "minip2p-relay"
+version = "0.1.0"
+dependencies = [
+ "minip2p-core",
+ "thiserror",
+]
+
+[[package]]
 name = "minip2p-swarm"
 version = "0.1.0"
 dependencies = [
